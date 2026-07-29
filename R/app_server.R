@@ -443,7 +443,15 @@ server <- function(input, output, session) {
   observeEvent(input$prescription_table, {
     old_df <- grid_data()
     df <- hot_to_r(input$prescription_table)
-    df <- recalculate_scenarios(df, old_df, input$scenario_add_cols)
+    active_cols <- intersect(as.character(input$scenario_add_cols), names(df))
+    # If scenario columns are selected, always recompute Scenario so table
+    # re-renders cannot revert to stale values.
+    df <- recalculate_scenarios(
+      df,
+      old_df,
+      input$scenario_add_cols,
+      force_auto = length(active_cols) > 0
+    )
     grid_data(df)
   })
 
