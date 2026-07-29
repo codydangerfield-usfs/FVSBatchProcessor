@@ -2,6 +2,7 @@
 # Split for package structure on 2026-07-29 11:06:54
 
 server <- function(input, output, session) {
+  options(shiny.maxRequestSize = 10000 * 1024^2)
   
   bg_gen <- reactiveVal(NULL)
   bg_run <- reactiveVal(NULL)
@@ -30,7 +31,6 @@ server <- function(input, output, session) {
   }
   
   # --- SHINY-NATIVE PICKER FLOWS ---
-  dir_picker_target <- reactiveVal(NULL)
 
   normalize_dir_input <- function(path, fallback = getwd()) {
     if (is.null(path) || length(path) == 0 || is.na(path[1])) {
@@ -43,78 +43,31 @@ server <- function(input, output, session) {
     normalizePath(path, winslash = "/", mustWork = FALSE)
   }
 
-  list_dir_choices <- function(start_dir) {
-    base_dir <- normalize_dir_input(start_dir)
-    parent_dir <- dirname(base_dir)
-    child_dirs <- tryCatch(
-      list.dirs(base_dir, full.names = TRUE, recursive = FALSE),
-      error = function(e) character(0)
-    )
-    unique(normalizePath(c(base_dir, parent_dir, child_dirs), winslash = "/", mustWork = FALSE))
-  }
+  pick_directory <- function(start_dir, caption) {
+    start_dir <- normalize_dir_input(start_dir, fallback = getwd())
 
-  open_dir_picker_modal <- function(target_input, title, start_dir) {
-    choices <- list_dir_choices(start_dir)
-    dir_picker_target(target_input)
-
-    showModal(modalDialog(
-      title = title,
-      selectInput(
-        inputId = "dir_picker_choice",
-        label = "Quick Select",
-        choices = choices,
-        selected = choices[1],
-        multiple = FALSE,
-        selectize = FALSE
-      ),
-      textInput(
-        inputId = "dir_picker_manual",
-        label = "Folder Path",
-        value = choices[1],
-        placeholder = "Enter or paste folder path"
-      ),
-      easyClose = TRUE,
-      footer = tagList(
-        modalButton("Cancel"),
-        actionButton("dir_picker_apply", "Use This Folder", class = "btn-primary")
-      )
-    ))
-  }
-
-  observeEvent(input$dir_picker_choice, {
-    req(input$dir_picker_choice)
-    updateTextInput(session, "dir_picker_manual", value = input$dir_picker_choice)
-  }, ignoreInit = TRUE)
-
-  observeEvent(input$dir_picker_apply, {
-    target <- dir_picker_target()
-    req(target)
-
-    candidate <- normalize_dir_input(input$dir_picker_manual, fallback = getwd())
-    if (!dir.exists(candidate)) {
-      showNotification("Selected folder does not exist. Choose or enter a valid folder path.", type = "error")
-      return()
+    selected <- ""
+    if (.Platform$OS.type == "windows" && exists("choose.dir", where = asNamespace("utils"), mode = "function")) {
+      selected <- tryCatch(utils::choose.dir(default = start_dir, caption = caption), error = function(e) "")
     }
 
-    updateTextInput(session, target, value = candidate)
-    removeModal()
-  })
+    if (!nzchar(selected) && requireNamespace("tcltk", quietly = TRUE)) {
+      selected <- tryCatch(tcltk::tk_choose.dir(default = start_dir, caption = caption), error = function(e) "")
+    }
+
+    if (!nzchar(selected)) return("")
+    normalizePath(selected, winslash = "/", mustWork = FALSE)
+  }
 
   observeEvent(input$browse_root, {
-    open_dir_picker_modal(
-      target_input = "root_dir",
-      title = "Select Root Folder",
-      start_dir = input$root_dir
-    )
+    picked <- pick_directory(input$root_dir, "Select Root Folder")
+    if (nzchar(picked)) updateTextInput(session, "root_dir", value = picked)
   })
 
   observeEvent(input$browse_kcp, {
     start_dir <- if (nzchar(trimws(as.character(input$kcp_dir)))) input$kcp_dir else input$root_dir
-    open_dir_picker_modal(
-      target_input = "kcp_dir",
-      title = "Select KCP Folder",
-      start_dir = start_dir
-    )
+    picked <- pick_directory(start_dir, "Select KCP Folder")
+    if (nzchar(picked)) updateTextInput(session, "kcp_dir", value = picked)
   })
 
   observeEvent(input$master_db_upload, {

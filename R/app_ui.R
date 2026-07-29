@@ -116,16 +116,12 @@ ui <- page_fillable(
           inputId = "master_db_upload",
           label = NULL,
           accept = c(".db", ".sqlite"),
-          buttonLabel = "Browse DB...",
+          buttonLabel = "Browse...",
           placeholder = "No database selected",
           width = "100%"
         ),
-        textInput(
-          inputId = "master_db",
-          label = "Resolved Database Name/Path",
-          value = DefaultDB,
-          placeholder = "Database name (or absolute path)"
-        ),
+        # Hidden internal value retained for downstream pipeline logic.
+        div(style = "display:none;", textInput("master_db", NULL, value = DefaultDB)),
         
         tags$label("KCP Directory Name", class = "form-label", `for` = "kcp_dir"),
         div(class = "input-group mb-3",
