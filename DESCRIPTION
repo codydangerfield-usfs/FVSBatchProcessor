@@ -2,9 +2,7 @@ Package: FVSBatchProcessor
 Type: Package
 Title: Shiny Batch Processor for Forest Vegetation Simulator
 Version: 0.1.0
-Authors@R: c(
-    person(given = "Cody", family = "Dangerfield", role = c("aut", "cre"), email = "cody.dangerfield@usda.gov")
-)
+Authors@R: c(person(given = "Cody", family = "Dangerfield", role = c("aut", "cre"), email = "cody.dangerfield@usda.gov"))
 Description: Interactive Shiny application for building scenario manifests,
     generating FVS keyfiles, running parallel rFVS simulations, and consolidating
     SQLite outputs for large batch workflows.
