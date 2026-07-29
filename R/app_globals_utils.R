@@ -42,10 +42,23 @@ register_workflow_assets <- function() {
 
 register_workflow_assets()
 
-# Keep startup light: do not scan network/project folders until the user
-# explicitly runs "Scan Directories & Connect DB".
-DefaultDB <- "AllBKNF_Combined.db"
-DefaultKCP <- "KCP_Catalog"
+# Dynamically determine defaults from RootDir.
+# DefaultDB prefers the first SQLite file under RootDir/Inputs.
+InputsDir <- file.path(RootDir, "Inputs")
+available_dbs <- if (dir.exists(InputsDir)) {
+  tryCatch(
+    list.files(InputsDir, pattern = "\\.(db|sqlite)$", ignore.case = TRUE, full.names = FALSE),
+    error = function(e) character(0)
+  )
+} else {
+  character(0)
+}
+DefaultDB <- if (length(available_dbs) > 0) available_dbs[1] else "AllBKNF_Combined.db"
+
+# DefaultKCP prefers a top-level folder under RootDir with "KCP" in its name.
+available_dirs <- tryCatch(list.dirs(RootDir, full.names = FALSE, recursive = FALSE), error = function(e) character(0))
+kcp_matches <- available_dirs[grepl("KCP", available_dirs, ignore.case = TRUE)]
+DefaultKCP <- if (length(kcp_matches) > 0) kcp_matches[1] else "KCP_Catalog"
 
 # Ensure the base directory for runs exists
 if (!dir.exists(RunBaseDir)) dir.create(RunBaseDir, recursive = TRUE, showWarnings = FALSE)
