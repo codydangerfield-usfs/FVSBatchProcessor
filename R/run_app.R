@@ -4,8 +4,6 @@
 #' @param ... Additional arguments passed to shiny::runApp.
 #' @export
 run_app <- function(launch.browser = TRUE, ...) {
-  options(shiny.maxRequestSize = 10000 * 1024^2)
-
   if (!requireNamespace("rFVS", quietly = TRUE)) {
     stop(
       "Package 'rFVS' is required. Install it with:\n",

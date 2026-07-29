@@ -2,7 +2,6 @@
 # Split for package structure on 2026-07-29 11:06:54
 
 server <- function(input, output, session) {
-  options(shiny.maxRequestSize = 10000 * 1024^2)
   
   bg_gen <- reactiveVal(NULL)
   bg_run <- reactiveVal(NULL)
@@ -43,35 +42,18 @@ server <- function(input, output, session) {
     normalizePath(path, winslash = "/", mustWork = FALSE)
   }
 
-  as_windows_path <- function(path) {
-    gsub("/", "\\\\", normalize_dir_input(path), fixed = TRUE)
-  }
-
-  pick_directory <- function(start_dir, caption) {
-    start_dir_win <- as_windows_path(start_dir)
-    selected <- ""
-
-    if (.Platform$OS.type == "windows" && exists("choose.dir", where = asNamespace("utils"), mode = "function")) {
-      selected <- tryCatch(utils::choose.dir(default = start_dir_win, caption = caption), error = function(e) "")
-    }
-
-    if (!nzchar(selected) && requireNamespace("tcltk", quietly = TRUE)) {
-      selected <- tryCatch(tcltk::tk_choose.dir(default = start_dir_win, caption = caption), error = function(e) "")
-    }
-
-    if (is.null(selected) || is.na(selected) || !nzchar(trimws(as.character(selected)))) return("")
-    normalizePath(selected, winslash = "/", mustWork = FALSE)
-  }
-
   observeEvent(input$browse_root, {
-    picked <- pick_directory(input$root_dir, "Select Root Folder")
-    if (nzchar(picked)) updateTextInput(session, "root_dir", value = picked)
+    file <- tryCatch(file.choose(), error = function(e) "")
+    if (nzchar(file)) {
+      updateTextInput(session, "root_dir", value = normalizePath(dirname(file), winslash = "/", mustWork = FALSE))
+    }
   })
 
   observeEvent(input$browse_kcp, {
-    start_dir <- if (nzchar(trimws(as.character(input$kcp_dir)))) input$kcp_dir else input$root_dir
-    picked <- pick_directory(start_dir, "Select KCP Folder")
-    if (nzchar(picked)) updateTextInput(session, "kcp_dir", value = picked)
+    file <- tryCatch(file.choose(), error = function(e) "")
+    if (nzchar(file)) {
+      updateTextInput(session, "kcp_dir", value = normalizePath(dirname(file), winslash = "/", mustWork = FALSE))
+    }
   })
 
   observeEvent(input$master_db_upload, {
@@ -182,12 +164,16 @@ server <- function(input, output, session) {
     list(root = root, db = db_default, kcp = kcp_default)
   }
 
-  session$onFlushed(function() {
+  defaults_initialized <- reactiveVal(FALSE)
+
+  observe({
+    if (isTRUE(defaults_initialized())) return()
     d <- derive_runtime_defaults(getwd())
-    session$sendInputMessage("root_dir", list(value = d$root))
-    session$sendInputMessage("master_db", list(value = d$db))
-    session$sendInputMessage("kcp_dir", list(value = d$kcp))
-  }, once = TRUE)
+    updateTextInput(session, "root_dir", value = d$root)
+    updateTextInput(session, "master_db", value = d$db)
+    updateTextInput(session, "kcp_dir", value = d$kcp)
+    defaults_initialized(TRUE)
+  })
   
   meta <- reactiveValues(groups = NULL, catalog = NULL, types = NULL)
   grid_data <- reactiveVal(data.frame())
