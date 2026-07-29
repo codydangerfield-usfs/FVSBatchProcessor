@@ -6,8 +6,8 @@
 # Increase maximum upload size to 10GB for very large database/file transfers
 options(shiny.maxRequestSize = 10000 * 1024^2)
 
-# Determine root directory, usually one level up from this script's working dir
-RootDir <- normalizePath(dirname(getwd()), winslash = "/", mustWork = FALSE)
+# Use the active working directory as the root project directory.
+RootDir <- normalizePath(getwd(), winslash = "/", mustWork = FALSE)
 # Define where simulation runs will be hosted
 RunBaseDir <- file.path(RootDir, "rFVS_Runs")
 # Set path for the KCP combinations manifest file
@@ -23,8 +23,7 @@ register_workflow_assets <- function() {
     file.path(getwd(), "inst", "app", "www"),
     file.path(getwd(), "app", "www"),
     file.path(getwd(), "www"),
-    file.path(getwd(), "Scripts", "www"),
-    file.path(RootDir, "Scripts", "www")
+    file.path(getwd(), "Scripts", "www")
   )
 
   workflow_img_dir <- workflow_img_dirs[file.exists(file.path(workflow_img_dirs, WorkflowImageFile))][1]
@@ -43,15 +42,10 @@ register_workflow_assets <- function() {
 
 register_workflow_assets()
 
-# Determine default master database file based on contents of Inputs folder
-InputsDir <- file.path(RootDir, "Inputs")
-available_dbs <- list.files(InputsDir, pattern = "\\.(db|sqlite)$", ignore.case = TRUE, full.names = FALSE)
-DefaultDB <- if (length(available_dbs) > 0) available_dbs[1] else "AllBKNF_Combined.db"
-
-# Determine default KCP directory based on contents of RootDir
-available_dirs <- list.dirs(RootDir, full.names = FALSE, recursive = FALSE)
-kcp_matches <- available_dirs[grepl("KCP", available_dirs, ignore.case = TRUE)]
-DefaultKCP <- if (length(kcp_matches) > 0) kcp_matches[1] else "KCP_Catalog"
+# Keep startup light: do not scan network/project folders until the user
+# explicitly runs "Scan Directories & Connect DB".
+DefaultDB <- "AllBKNF_Combined.db"
+DefaultKCP <- "KCP_Catalog"
 
 # Ensure the base directory for runs exists
 if (!dir.exists(RunBaseDir)) dir.create(RunBaseDir, recursive = TRUE, showWarnings = FALSE)

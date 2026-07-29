@@ -19,7 +19,68 @@ server <- function(input, output, session) {
   prog_file_run <- tempfile(pattern = "run_", fileext = ".txt")
   prog_file_merge <- tempfile(pattern = "merge_", fileext = ".txt")
 
+  normalize_dialog_default <- function(path, fallback = ".") {
+    p <- trimws(as.character(path))
+    if (!nzchar(p)) p <- fallback
+    if (!dir.exists(p)) p <- fallback
+    normalizePath(p, winslash = "\\", mustWork = FALSE)
+  }
+
+  pick_directory_ps <- function(default = ".", caption = "Select folder") {
+    if (.Platform$OS.type != "windows") return(NA_character_)
+    if (Sys.which("powershell") == "") return(NA_character_)
+
+    default <- gsub("'", "''", normalize_dialog_default(default), fixed = TRUE)
+    caption <- gsub("'", "''", caption, fixed = TRUE)
+
+    ps_cmd <- paste0(
+      "Add-Type -AssemblyName System.Windows.Forms; ",
+      "$dlg = New-Object System.Windows.Forms.FolderBrowserDialog; ",
+      "$dlg.Description = '", caption, "'; ",
+      "$dlg.SelectedPath = '", default, "'; ",
+      "if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($dlg.SelectedPath) }"
+    )
+
+    out <- tryCatch(
+      system2("powershell", args = c("-NoProfile", "-STA", "-Command", ps_cmd), stdout = TRUE, stderr = FALSE),
+      error = function(e) character(0)
+    )
+    if (length(out) == 0) return(NA_character_)
+    dir <- trimws(paste(out, collapse = "\n"))
+    if (!nzchar(dir)) return(NA_character_)
+    dir
+  }
+
+  pick_file_ps <- function(default = ".", caption = "Select file") {
+    if (.Platform$OS.type != "windows") return("")
+    if (Sys.which("powershell") == "") return("")
+
+    default <- gsub("'", "''", normalize_dialog_default(default), fixed = TRUE)
+    caption <- gsub("'", "''", caption, fixed = TRUE)
+
+    ps_cmd <- paste0(
+      "Add-Type -AssemblyName System.Windows.Forms; ",
+      "$dlg = New-Object System.Windows.Forms.OpenFileDialog; ",
+      "$dlg.Title = '", caption, "'; ",
+      "$dlg.InitialDirectory = '", default, "'; ",
+      "$dlg.Filter = 'SQLite/DB files (*.db;*.sqlite)|*.db;*.sqlite|All files (*.*)|*.*'; ",
+      "if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($dlg.FileName) }"
+    )
+
+    out <- tryCatch(
+      system2("powershell", args = c("-NoProfile", "-STA", "-Command", ps_cmd), stdout = TRUE, stderr = FALSE),
+      error = function(e) character(0)
+    )
+    if (length(out) == 0) return("")
+    file <- trimws(paste(out, collapse = "\n"))
+    if (!nzchar(file)) return("")
+    file
+  }
+
   pick_directory <- function(default = ".", caption = "Select folder") {
+    dir <- pick_directory_ps(default = default, caption = caption)
+    if (!is.na(dir) && nzchar(dir)) return(dir)
+
     if (requireNamespace("rstudioapi", quietly = TRUE) && isTRUE(rstudioapi::isAvailable())) {
       dir <- tryCatch(rstudioapi::selectDirectory(path = default, caption = caption), error = function(e) NULL)
       if (!is.null(dir) && nzchar(dir)) return(dir)
@@ -39,6 +100,9 @@ server <- function(input, output, session) {
   }
 
   pick_file <- function(default = ".", caption = "Select file") {
+    file <- pick_file_ps(default = default, caption = caption)
+    if (nzchar(file)) return(file)
+
     if (requireNamespace("rstudioapi", quietly = TRUE) && isTRUE(rstudioapi::isAvailable())) {
       file <- tryCatch(rstudioapi::selectFile(path = default, caption = caption), error = function(e) NULL)
       if (!is.null(file) && nzchar(file)) return(file)
@@ -150,7 +214,7 @@ server <- function(input, output, session) {
         })
       }, error = function(e) {})
     }
-  }, ignoreInit = FALSE)
+  }, ignoreInit = TRUE)
   
   observeEvent(input$stand_tbl, {
     req(input$master_db, input$root_dir, input$stand_tbl)
@@ -176,7 +240,7 @@ server <- function(input, output, session) {
         })
       }, error = function(e) {})
     }
-  })
+  }, ignoreInit = TRUE)
   
   manifest_path <- reactive({
     req(input$root_dir)
