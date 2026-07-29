@@ -56,29 +56,19 @@ server <- function(input, output, session) {
     }
   })
 
-  observeEvent(input$master_db_upload, {
-    file_info <- input$master_db_upload
-    req(file_info)
+  observeEvent(input$browse_db, {
+    file <- tryCatch(file.choose(), error = function(e) "")
+    if (nzchar(file)) {
+      inputs_dir <- find_input_dir(input$root_dir)
+      file_dir <- normalizePath(dirname(file), winslash = "/", mustWork = FALSE)
 
-    runtime_root <- normalize_dir_input(input$root_dir, fallback = getwd())
-    input_dir <- find_input_dir(runtime_root)
-    if (!nzchar(input_dir)) {
-      input_dir <- normalizePath(file.path(runtime_root, "Inputs"), winslash = "/", mustWork = FALSE)
-      dir.create(input_dir, recursive = TRUE, showWarnings = FALSE)
+      if (nzchar(inputs_dir) && identical(inputs_dir, file_dir)) {
+        updateTextInput(session, "master_db", value = basename(file))
+      } else {
+        updateTextInput(session, "master_db", value = normalizePath(file, winslash = "/", mustWork = FALSE))
+      }
     }
-
-    db_name <- basename(file_info$name)
-    db_dest <- file.path(input_dir, db_name)
-    copied <- tryCatch(file.copy(file_info$datapath, db_dest, overwrite = TRUE), error = function(e) FALSE)
-
-    if (!isTRUE(copied)) {
-      showNotification("Database upload failed while staging file under the Inputs directory.", type = "error")
-      return()
-    }
-
-    updateTextInput(session, "master_db", value = db_name)
-    showNotification(sprintf("Database staged to %s", db_dest), type = "message")
-  }, ignoreInit = TRUE)
+  })
   
   find_input_dir <- function(root_dir) {
     top_dirs <- tryCatch(list.dirs(root_dir, full.names = TRUE, recursive = FALSE), error = function(e) character(0))
@@ -169,6 +159,7 @@ server <- function(input, output, session) {
   observe({
     if (isTRUE(defaults_initialized())) return()
     d <- derive_runtime_defaults(getwd())
+    if (!nzchar(trimws(as.character(d$db)))) d$db <- "<FVS_Input.db>"
     updateTextInput(session, "root_dir", value = d$root)
     updateTextInput(session, "master_db", value = d$db)
     updateTextInput(session, "kcp_dir", value = d$kcp)
@@ -178,6 +169,7 @@ server <- function(input, output, session) {
   observeEvent(input$root_dir, {
     runtime_root <- normalize_dir_input(input$root_dir, fallback = getwd())
     detected_db <- detect_single_db_name(runtime_root)
+    if (!nzchar(trimws(as.character(detected_db)))) detected_db <- "<FVS_Input.db>"
     updateTextInput(session, "master_db", value = detected_db)
   }, ignoreInit = TRUE)
   
