@@ -6,7 +6,7 @@
 
 ```r
 install.packages("remotes")
-remotes::install_github("<your-org-or-user>/FVSBatchProcessor")
+remotes::install_github("https://github.com/codydangerfield-usfs/FVSBatchProcessor")
 ```
 
 `rFVS` is a required dependency and is declared in `Remotes`, so it will be installed automatically from USDA Forest Service when installing this package from GitHub.
