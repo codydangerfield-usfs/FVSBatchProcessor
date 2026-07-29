@@ -43,32 +43,48 @@ server <- function(input, output, session) {
   }
 
   observeEvent(input$browse_root, {
-    file <- tryCatch(file.choose(), error = function(e) "")
-    if (nzchar(file)) {
-      updateTextInput(session, "root_dir", value = normalizePath(dirname(file), winslash = "/", mustWork = FALSE))
+    if (!exists("choose.dir", where = asNamespace("utils"), mode = "function")) {
+      showNotification("Folder browser is unavailable in this R session.", type = "error")
+      return()
+    }
+    dir <- utils::choose.dir(default = input$root_dir, caption = "Select Root Folder Path")
+    if (!is.na(dir) && nzchar(dir)) {
+      updateTextInput(session, "root_dir", value = normalizePath(dir, winslash = "/", mustWork = FALSE))
     }
   })
 
   observeEvent(input$browse_kcp, {
-    file <- tryCatch(file.choose(), error = function(e) "")
-    if (nzchar(file)) {
-      updateTextInput(session, "kcp_dir", value = normalizePath(dirname(file), winslash = "/", mustWork = FALSE))
+    if (!exists("choose.dir", where = asNamespace("utils"), mode = "function")) {
+      showNotification("Folder browser is unavailable in this R session.", type = "error")
+      return()
+    }
+    default_path <- file.path(input$root_dir, "KCP_Catalog")
+    dir <- utils::choose.dir(default = default_path, caption = "Select KCP Directory")
+    if (!is.na(dir) && nzchar(dir)) {
+      updateTextInput(session, "kcp_dir", value = normalizePath(dir, winslash = "/", mustWork = FALSE))
     }
   })
 
-  observeEvent(input$browse_db, {
-    file <- tryCatch(file.choose(), error = function(e) "")
-    if (nzchar(file)) {
-      inputs_dir <- find_input_dir(input$root_dir)
-      file_dir <- normalizePath(dirname(file), winslash = "/", mustWork = FALSE)
+  observeEvent(input$master_db_upload, {
+    file_info <- input$master_db_upload
+    req(file_info)
 
-      if (nzchar(inputs_dir) && identical(inputs_dir, file_dir)) {
-        updateTextInput(session, "master_db", value = basename(file))
-      } else {
-        updateTextInput(session, "master_db", value = normalizePath(file, winslash = "/", mustWork = FALSE))
-      }
+    runtime_root <- normalizePath(input$root_dir, winslash = "/", mustWork = FALSE)
+    inputs_dir <- normalizePath(file.path(runtime_root, "Inputs"), winslash = "/", mustWork = FALSE)
+    if (!dir.exists(inputs_dir)) dir.create(inputs_dir, recursive = TRUE, showWarnings = FALSE)
+
+    db_name <- basename(file_info$name)
+    db_dest <- file.path(inputs_dir, db_name)
+    copied <- tryCatch(file.copy(file_info$datapath, db_dest, overwrite = TRUE), error = function(e) FALSE)
+
+    if (!isTRUE(copied)) {
+      showNotification("Failed to stage uploaded database into Inputs.", type = "error")
+      return()
     }
-  })
+
+    updateTextInput(session, "master_db", value = db_name)
+    showNotification(sprintf("Master database staged to %s", db_dest), type = "message")
+  }, ignoreInit = TRUE)
   
   find_input_dir <- function(root_dir) {
     top_dirs <- tryCatch(list.dirs(root_dir, full.names = TRUE, recursive = FALSE), error = function(e) character(0))
@@ -170,7 +186,11 @@ server <- function(input, output, session) {
     runtime_root <- normalize_dir_input(input$root_dir, fallback = getwd())
     detected_db <- detect_single_db_name(runtime_root)
     if (!nzchar(trimws(as.character(detected_db)))) detected_db <- "<FVS_Input.db>"
-    updateTextInput(session, "master_db", value = detected_db)
+    
+    if (detected_db != "<FVS_Input.db>") {
+        updateTextInput(session, "master_db", value = detected_db)
+        shinyjs::runjs(sprintf("$('#master_db_upload').closest('.input-group').find('input[type=\"text\"]').val('%s');", detected_db))
+    }
   }, ignoreInit = TRUE)
   
   meta <- reactiveValues(groups = NULL, catalog = NULL, types = NULL)
