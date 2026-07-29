@@ -16,6 +16,10 @@ run_app <- function(launch.browser = TRUE, ...) {
     register_workflow_assets()
   }
 
+  # Increase maximum upload size to 10GB for very large database/file transfers
+  opt <- options(shiny.maxRequestSize = 10000 * 1024^2)
+  on.exit(options(opt), add = TRUE)
+
   shiny::runApp(
     shiny::shinyApp(ui = ui, server = server),
     launch.browser = launch.browser,
