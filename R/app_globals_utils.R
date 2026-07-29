@@ -45,12 +45,12 @@ register_workflow_assets()
 # Dynamically determine defaults from RootDir.
 # DefaultDB uses a top-level Input/Inputs-like folder and only auto-selects
 # when exactly one SQLite DB is found.
-candidate_input_dirs <- tryCatch(list.dirs(RootDir, full.names = TRUE, recursive = FALSE), error = function(e) character(0))
-candidate_input_dirs <- candidate_input_dirs[grepl("input", basename(candidate_input_dirs), ignore.case = TRUE)]
-if (length(candidate_input_dirs) > 1) {
-  exact_match <- candidate_input_dirs[tolower(basename(candidate_input_dirs)) %in% c("input", "inputs")]
-  if (length(exact_match) > 0) candidate_input_dirs <- exact_match
-}
+top_dirs <- tryCatch(list.dirs(RootDir, full.names = TRUE, recursive = FALSE), error = function(e) character(0))
+top_dirs <- unique(normalizePath(top_dirs, winslash = "/", mustWork = FALSE))
+
+candidate_input_dirs <- top_dirs[grepl("input", basename(top_dirs), ignore.case = TRUE)]
+exact_input <- candidate_input_dirs[tolower(basename(candidate_input_dirs)) %in% c("input", "inputs")]
+if (length(exact_input) > 0) candidate_input_dirs <- exact_input
 
 available_dbs <- if (length(candidate_input_dirs) > 0) {
   tryCatch(
@@ -64,9 +64,10 @@ available_dbs <- if (length(candidate_input_dirs) > 0) {
 DefaultDB <- if (length(available_dbs) == 1) available_dbs[1] else "<FVS_Input.db>"
 
 # DefaultKCP prefers a top-level folder under RootDir with "KCP" in its name.
-available_dirs <- tryCatch(list.dirs(RootDir, full.names = FALSE, recursive = FALSE), error = function(e) character(0))
-kcp_matches <- available_dirs[grepl("KCP", available_dirs, ignore.case = TRUE)]
-DefaultKCP <- if (length(kcp_matches) > 0) kcp_matches[1] else "KCP_Catalog"
+kcp_matches <- top_dirs[grepl("kcp", basename(top_dirs), ignore.case = TRUE)]
+exact_kcp <- kcp_matches[tolower(basename(kcp_matches)) %in% c("kcp", "kcp_catalog")]
+if (length(exact_kcp) > 0) kcp_matches <- exact_kcp
+DefaultKCP <- if (length(kcp_matches) > 0) normalizePath(kcp_matches[1], winslash = "/", mustWork = FALSE) else "KCP_Catalog"
 
 # Ensure the base directory for runs exists
 if (!dir.exists(RunBaseDir)) dir.create(RunBaseDir, recursive = TRUE, showWarnings = FALSE)
