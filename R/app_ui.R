@@ -111,21 +111,20 @@ ui <- page_fillable(
             )
         ),
         
-        tags$label("Master Database File", class = "form-label", `for` = "master_db"),
-        div(class = "input-group mb-3",
-            tags$button(
-              id = "browse_db",
-              type = "button",
-              class = "btn btn-default action-button",
-              "Browse..."
-            ),
-            tags$input(
-              id = "master_db",
-              type = "text",
-              class = "form-control",
-              value = DefaultDB,
-              placeholder = "Select master database file"
-            )
+        tags$label("Master Database File", class = "form-label", `for` = "master_db_upload"),
+        fileInput(
+          inputId = "master_db_upload",
+          label = NULL,
+          accept = c(".db", ".sqlite"),
+          buttonLabel = "Browse DB...",
+          placeholder = "No database selected",
+          width = "100%"
+        ),
+        textInput(
+          inputId = "master_db",
+          label = "Resolved Database Name/Path",
+          value = DefaultDB,
+          placeholder = "Database name (or absolute path)"
         ),
         
         tags$label("KCP Directory Name", class = "form-label", `for` = "kcp_dir"),

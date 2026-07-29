@@ -29,35 +29,117 @@ server <- function(input, output, session) {
     sprintf("%02d:%02d:%02d", hh, mm, ss)
   }
   
-  # --- UI BUTTON BROWSER EVENT OBSERVERS ---
+  # --- SHINY-NATIVE PICKER FLOWS ---
+  dir_picker_target <- reactiveVal(NULL)
+
+  normalize_dir_input <- function(path, fallback = getwd()) {
+    if (is.null(path) || length(path) == 0 || is.na(path[1])) {
+      path <- ""
+    } else {
+      path <- path[1]
+    }
+    path <- trimws(as.character(path))
+    if (!nzchar(path)) path <- fallback
+    normalizePath(path, winslash = "/", mustWork = FALSE)
+  }
+
+  list_dir_choices <- function(start_dir) {
+    base_dir <- normalize_dir_input(start_dir)
+    parent_dir <- dirname(base_dir)
+    child_dirs <- tryCatch(
+      list.dirs(base_dir, full.names = TRUE, recursive = FALSE),
+      error = function(e) character(0)
+    )
+    unique(normalizePath(c(base_dir, parent_dir, child_dirs), winslash = "/", mustWork = FALSE))
+  }
+
+  open_dir_picker_modal <- function(target_input, title, start_dir) {
+    choices <- list_dir_choices(start_dir)
+    dir_picker_target(target_input)
+
+    showModal(modalDialog(
+      title = title,
+      selectInput(
+        inputId = "dir_picker_choice",
+        label = "Quick Select",
+        choices = choices,
+        selected = choices[1],
+        multiple = FALSE,
+        selectize = FALSE
+      ),
+      textInput(
+        inputId = "dir_picker_manual",
+        label = "Folder Path",
+        value = choices[1],
+        placeholder = "Enter or paste folder path"
+      ),
+      easyClose = TRUE,
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("dir_picker_apply", "Use This Folder", class = "btn-primary")
+      )
+    ))
+  }
+
+  observeEvent(input$dir_picker_choice, {
+    req(input$dir_picker_choice)
+    updateTextInput(session, "dir_picker_manual", value = input$dir_picker_choice)
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$dir_picker_apply, {
+    target <- dir_picker_target()
+    req(target)
+
+    candidate <- normalize_dir_input(input$dir_picker_manual, fallback = getwd())
+    if (!dir.exists(candidate)) {
+      showNotification("Selected folder does not exist. Choose or enter a valid folder path.", type = "error")
+      return()
+    }
+
+    updateTextInput(session, target, value = candidate)
+    removeModal()
+  })
+
   observeEvent(input$browse_root, {
-    file <- tryCatch(file.choose(), error = function(e) "")
-    if (nzchar(file)) {
-      updateTextInput(session, "root_dir", value = normalizePath(dirname(file), winslash = "/", mustWork = FALSE))
-    }
+    open_dir_picker_modal(
+      target_input = "root_dir",
+      title = "Select Root Folder",
+      start_dir = input$root_dir
+    )
   })
-  
-  observeEvent(input$browse_db, {
-    file <- tryCatch(file.choose(), error = function(e) "")
-    
-    if (nzchar(file)) {
-      inputs_dir <- find_input_dir(input$root_dir)
-      file_dir <- normalizePath(dirname(file), winslash = "/", mustWork = FALSE)
-      
-      if (nzchar(inputs_dir) && inputs_dir == file_dir) {
-        updateTextInput(session, "master_db", value = basename(file))
-      } else {
-        updateTextInput(session, "master_db", value = normalizePath(file, winslash = "/", mustWork = FALSE))
-      }
-    }
-  })
-  
+
   observeEvent(input$browse_kcp, {
-    file <- tryCatch(file.choose(), error = function(e) "")
-    if (nzchar(file)) {
-      updateTextInput(session, "kcp_dir", value = normalizePath(dirname(file), winslash = "/", mustWork = FALSE))
-    }
+    start_dir <- if (nzchar(trimws(as.character(input$kcp_dir)))) input$kcp_dir else input$root_dir
+    open_dir_picker_modal(
+      target_input = "kcp_dir",
+      title = "Select KCP Folder",
+      start_dir = start_dir
+    )
   })
+
+  observeEvent(input$master_db_upload, {
+    file_info <- input$master_db_upload
+    req(file_info)
+
+    runtime_root <- normalize_dir_input(input$root_dir, fallback = getwd())
+    input_dir <- find_input_dir(runtime_root)
+    if (!nzchar(input_dir)) {
+      input_dir <- normalizePath(file.path(runtime_root, "Inputs"), winslash = "/", mustWork = FALSE)
+      dir.create(input_dir, recursive = TRUE, showWarnings = FALSE)
+    }
+
+    db_name <- basename(file_info$name)
+    db_dest <- file.path(input_dir, db_name)
+    copied <- tryCatch(file.copy(file_info$datapath, db_dest, overwrite = TRUE), error = function(e) FALSE)
+
+    if (!isTRUE(copied)) {
+      showNotification("Database upload failed while staging file under the Inputs directory.", type = "error")
+      return()
+    }
+
+    updateTextInput(session, "master_db", value = db_name)
+    showNotification(sprintf("Database staged to %s", db_dest), type = "message")
+  }, ignoreInit = TRUE)
   
   find_input_dir <- function(root_dir) {
     top_dirs <- tryCatch(list.dirs(root_dir, full.names = TRUE, recursive = FALSE), error = function(e) character(0))
