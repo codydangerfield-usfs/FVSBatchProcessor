@@ -185,6 +185,35 @@ server <- function(input, output, session) {
       normalizePath(file.path(root_dir, dir_name), winslash = slash, mustWork = FALSE)
     }
   }
+
+  # Runtime defaults must be derived at launch (not package install time).
+  derive_runtime_defaults <- function(project_root) {
+    root <- normalizePath(project_root, winslash = "/", mustWork = FALSE)
+
+    inputs_dir <- file.path(root, "Inputs")
+    available_dbs <- if (dir.exists(inputs_dir)) {
+      tryCatch(
+        list.files(inputs_dir, pattern = "\\\\.(db|sqlite)$", ignore.case = TRUE, full.names = FALSE),
+        error = function(e) character(0)
+      )
+    } else {
+      character(0)
+    }
+    db_default <- if (length(available_dbs) > 0) available_dbs[1] else "AllBKNF_Combined.db"
+
+    available_dirs <- tryCatch(list.dirs(root, full.names = FALSE, recursive = FALSE), error = function(e) character(0))
+    kcp_matches <- available_dirs[grepl("KCP", available_dirs, ignore.case = TRUE)]
+    kcp_default <- if (length(kcp_matches) > 0) kcp_matches[1] else "KCP_Catalog"
+
+    list(root = root, db = db_default, kcp = kcp_default)
+  }
+
+  observe({
+    d <- derive_runtime_defaults(getwd())
+    updateTextInput(session, "root_dir", value = d$root)
+    updateTextInput(session, "master_db", value = d$db)
+    updateTextInput(session, "kcp_dir", value = d$kcp)
+  }, once = TRUE)
   
   meta <- reactiveValues(groups = NULL, catalog = NULL, types = NULL)
   grid_data <- reactiveVal(data.frame())
