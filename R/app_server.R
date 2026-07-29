@@ -78,38 +78,21 @@ server <- function(input, output, session) {
   }
 
   pick_directory <- function(default = ".", caption = "Select folder") {
-    dir <- pick_directory_ps(default = default, caption = caption)
-    if (!is.na(dir) && nzchar(dir)) return(dir)
-
-    if (requireNamespace("rstudioapi", quietly = TRUE) && isTRUE(rstudioapi::isAvailable())) {
-      dir <- tryCatch(rstudioapi::selectDirectory(path = default, caption = caption), error = function(e) NULL)
-      if (!is.null(dir) && nzchar(dir)) return(dir)
-    }
-
-    if (.Platform$OS.type == "windows" && exists("choose.dir", where = asNamespace("utils"), mode = "function")) {
-      dir <- tryCatch(utils::choose.dir(default = default, caption = caption), error = function(e) NA_character_)
-      if (!is.na(dir) && nzchar(dir)) return(dir)
-    }
-
-    if (requireNamespace("tcltk", quietly = TRUE)) {
-      dir <- tryCatch(tcltk::tk_choose.dir(default = default, caption = caption), error = function(e) NA_character_)
-      if (!is.na(dir) && nzchar(dir)) return(dir)
-    }
-
-    NA_character_
+    # Use the file picker for consistency with other browse controls.
+    file <- pick_file(default = default, caption = paste0(caption, " (select any file inside the target folder)"))
+    if (!nzchar(file)) return(NA_character_)
+    normalizePath(dirname(file), winslash = "/", mustWork = FALSE)
   }
 
   pick_file <- function(default = ".", caption = "Select file") {
-    file <- pick_file_ps(default = default, caption = caption)
-    if (nzchar(file)) return(file)
-
     if (requireNamespace("rstudioapi", quietly = TRUE) && isTRUE(rstudioapi::isAvailable())) {
       file <- tryCatch(rstudioapi::selectFile(path = default, caption = caption), error = function(e) NULL)
       if (!is.null(file) && nzchar(file)) return(file)
     }
 
     if (.Platform$OS.type == "windows" && exists("choose.files", where = asNamespace("utils"), mode = "function")) {
-      file <- tryCatch(utils::choose.files(default = default, caption = caption, multi = FALSE), error = function(e) character(0))
+      file_default <- if (dir.exists(default)) file.path(default, "*.*") else default
+      file <- tryCatch(utils::choose.files(default = file_default, caption = caption, multi = FALSE), error = function(e) character(0))
       if (length(file) > 0 && !is.na(file[1]) && nzchar(file[1])) return(file[1])
     }
 
@@ -137,7 +120,7 @@ server <- function(input, output, session) {
     if (!is.na(dir) && nzchar(dir)) {
       updateTextInput(session, "root_dir", value = normalizePath(dir, winslash = "/", mustWork = FALSE))
     } else {
-      showNotification("Folder picker is unavailable in this R session. Paste a full path manually.", type = "warning")
+      showNotification("No file selected. To set Root Folder Path, pick any file inside that folder.", type = "warning")
     }
   })
   
@@ -164,7 +147,7 @@ server <- function(input, output, session) {
     if (!is.na(dir) && nzchar(dir)) {
       updateTextInput(session, "kcp_dir", value = normalizePath(dir, winslash = "/", mustWork = FALSE))
     } else {
-      showNotification("Folder picker is unavailable in this R session. Paste a full path manually.", type = "warning")
+      showNotification("No file selected. To set KCP Directory, pick any file inside that folder.", type = "warning")
     }
   })
   
@@ -190,16 +173,22 @@ server <- function(input, output, session) {
   derive_runtime_defaults <- function(project_root) {
     root <- normalizePath(project_root, winslash = "/", mustWork = FALSE)
 
-    inputs_dir <- file.path(root, "Inputs")
-    available_dbs <- if (dir.exists(inputs_dir)) {
+    candidate_input_dirs <- tryCatch(list.dirs(root, full.names = TRUE, recursive = FALSE), error = function(e) character(0))
+    candidate_input_dirs <- candidate_input_dirs[grepl("input", basename(candidate_input_dirs), ignore.case = TRUE)]
+    if (length(candidate_input_dirs) > 1) {
+      exact_match <- candidate_input_dirs[tolower(basename(candidate_input_dirs)) %in% c("input", "inputs")]
+      if (length(exact_match) > 0) candidate_input_dirs <- exact_match
+    }
+
+    available_dbs <- if (length(candidate_input_dirs) > 0) {
       tryCatch(
-        list.files(inputs_dir, pattern = "\\\\.(db|sqlite)$", ignore.case = TRUE, full.names = FALSE),
+        list.files(candidate_input_dirs[1], pattern = "\\\\.(db|sqlite)$", ignore.case = TRUE, full.names = FALSE),
         error = function(e) character(0)
       )
     } else {
       character(0)
     }
-    db_default <- if (length(available_dbs) > 0) available_dbs[1] else "AllBKNF_Combined.db"
+    db_default <- if (length(available_dbs) == 1) available_dbs[1] else "<FVS_Input.db>"
 
     available_dirs <- tryCatch(list.dirs(root, full.names = FALSE, recursive = FALSE), error = function(e) character(0))
     kcp_matches <- available_dirs[grepl("KCP", available_dirs, ignore.case = TRUE)]

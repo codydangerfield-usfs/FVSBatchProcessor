@@ -43,17 +43,25 @@ register_workflow_assets <- function() {
 register_workflow_assets()
 
 # Dynamically determine defaults from RootDir.
-# DefaultDB prefers the first SQLite file under RootDir/Inputs.
-InputsDir <- file.path(RootDir, "Inputs")
-available_dbs <- if (dir.exists(InputsDir)) {
+# DefaultDB uses a top-level Input/Inputs-like folder and only auto-selects
+# when exactly one SQLite DB is found.
+candidate_input_dirs <- tryCatch(list.dirs(RootDir, full.names = TRUE, recursive = FALSE), error = function(e) character(0))
+candidate_input_dirs <- candidate_input_dirs[grepl("input", basename(candidate_input_dirs), ignore.case = TRUE)]
+if (length(candidate_input_dirs) > 1) {
+  exact_match <- candidate_input_dirs[tolower(basename(candidate_input_dirs)) %in% c("input", "inputs")]
+  if (length(exact_match) > 0) candidate_input_dirs <- exact_match
+}
+
+available_dbs <- if (length(candidate_input_dirs) > 0) {
   tryCatch(
-    list.files(InputsDir, pattern = "\\.(db|sqlite)$", ignore.case = TRUE, full.names = FALSE),
+    list.files(candidate_input_dirs[1], pattern = "\\.(db|sqlite)$", ignore.case = TRUE, full.names = FALSE),
     error = function(e) character(0)
   )
 } else {
   character(0)
 }
-DefaultDB <- if (length(available_dbs) > 0) available_dbs[1] else "AllBKNF_Combined.db"
+
+DefaultDB <- if (length(available_dbs) == 1) available_dbs[1] else "<FVS_Input.db>"
 
 # DefaultKCP prefers a top-level folder under RootDir with "KCP" in its name.
 available_dirs <- tryCatch(list.dirs(RootDir, full.names = FALSE, recursive = FALSE), error = function(e) character(0))
