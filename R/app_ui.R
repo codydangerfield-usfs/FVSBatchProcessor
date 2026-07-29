@@ -96,12 +96,7 @@ ui <- page_fillable(
         
         tags$label("Root Folder Path", class = "form-label", `for` = "root_dir"),
         div(class = "input-group mb-3",
-            tags$button(
-              id = "browse_root",
-              type = "button",
-              class = "btn btn-default action-button",
-              "Browse..."
-            ),
+            actionButton("browse_root", "Browse...", class = "btn btn-default"),
             tags$input(
               id = "root_dir",
               type = "text",
@@ -113,12 +108,7 @@ ui <- page_fillable(
         
         tags$label("Master Database File", class = "form-label", `for` = "master_db"),
         div(class = "input-group mb-3",
-            tags$button(
-              id = "browse_db",
-              type = "button",
-              class = "btn btn-default action-button",
-              "Browse..."
-            ),
+            actionButton("browse_db", "Browse...", class = "btn btn-default"),
             tags$input(
               id = "master_db",
               type = "text",
@@ -130,12 +120,7 @@ ui <- page_fillable(
         
         tags$label("KCP Directory Name", class = "form-label", `for` = "kcp_dir"),
         div(class = "input-group mb-3",
-            tags$button(
-              id = "browse_kcp",
-              type = "button",
-              class = "btn btn-default action-button",
-              "Browse..."
-            ),
+            actionButton("browse_kcp", "Browse...", class = "btn btn-default"),
             tags$input(
               id = "kcp_dir",
               type = "text",
