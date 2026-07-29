@@ -19,99 +19,6 @@ server <- function(input, output, session) {
   prog_file_run <- tempfile(pattern = "run_", fileext = ".txt")
   prog_file_merge <- tempfile(pattern = "merge_", fileext = ".txt")
 
-  normalize_dialog_default <- function(path, fallback = ".") {
-    p <- trimws(as.character(path))
-    if (!nzchar(p)) p <- fallback
-    if (!dir.exists(p)) p <- fallback
-    normalizePath(p, winslash = "\\", mustWork = FALSE)
-  }
-
-  pick_directory_ps <- function(default = ".", caption = "Select folder") {
-    if (.Platform$OS.type != "windows") return(NA_character_)
-    if (Sys.which("powershell") == "") return(NA_character_)
-
-    default <- gsub("'", "''", normalize_dialog_default(default), fixed = TRUE)
-    caption <- gsub("'", "''", caption, fixed = TRUE)
-
-    ps_cmd <- paste0(
-      "Add-Type -AssemblyName System.Windows.Forms; ",
-      "$dlg = New-Object System.Windows.Forms.FolderBrowserDialog; ",
-      "$dlg.Description = '", caption, "'; ",
-      "$dlg.SelectedPath = '", default, "'; ",
-      "if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($dlg.SelectedPath) }"
-    )
-
-    out <- tryCatch(
-      system2("powershell", args = c("-NoProfile", "-STA", "-Command", ps_cmd), stdout = TRUE, stderr = FALSE),
-      error = function(e) character(0)
-    )
-    if (length(out) == 0) return(NA_character_)
-    dir <- trimws(paste(out, collapse = "\n"))
-    if (!nzchar(dir)) return(NA_character_)
-    dir
-  }
-
-  pick_file_ps <- function(default = ".", caption = "Select file") {
-    if (.Platform$OS.type != "windows") return("")
-    if (Sys.which("powershell") == "") return("")
-
-    default <- gsub("'", "''", normalize_dialog_default(default), fixed = TRUE)
-    caption <- gsub("'", "''", caption, fixed = TRUE)
-
-    ps_cmd <- paste0(
-      "Add-Type -AssemblyName System.Windows.Forms; ",
-      "$dlg = New-Object System.Windows.Forms.OpenFileDialog; ",
-      "$dlg.Title = '", caption, "'; ",
-      "$dlg.InitialDirectory = '", default, "'; ",
-      "$dlg.Filter = 'SQLite/DB files (*.db;*.sqlite)|*.db;*.sqlite|All files (*.*)|*.*'; ",
-      "if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($dlg.FileName) }"
-    )
-
-    out <- tryCatch(
-      system2("powershell", args = c("-NoProfile", "-STA", "-Command", ps_cmd), stdout = TRUE, stderr = FALSE),
-      error = function(e) character(0)
-    )
-    if (length(out) == 0) return("")
-    file <- trimws(paste(out, collapse = "\n"))
-    if (!nzchar(file)) return("")
-    file
-  }
-
-  pick_directory <- function(default = ".", caption = "Select folder") {
-    dir <- pick_directory_ps(default = default, caption = caption)
-    if (!is.na(dir) && nzchar(dir)) return(normalizePath(dir, winslash = "/", mustWork = FALSE))
-
-    if (.Platform$OS.type == "windows" && exists("choose.dir", where = asNamespace("utils"), mode = "function")) {
-      dir <- tryCatch(utils::choose.dir(default = normalize_dialog_default(default), caption = caption), error = function(e) NA_character_)
-      if (!is.na(dir) && nzchar(dir)) return(normalizePath(dir, winslash = "/", mustWork = FALSE))
-    }
-
-    if (requireNamespace("tcltk", quietly = TRUE)) {
-      dir <- tryCatch(tcltk::tk_choose.dir(default = default, caption = caption), error = function(e) NA_character_)
-      if (!is.na(dir) && nzchar(dir)) return(normalizePath(dir, winslash = "/", mustWork = FALSE))
-    }
-
-    NA_character_
-  }
-
-  pick_file <- function(default = ".", caption = "Select file") {
-    file <- pick_file_ps(default = default, caption = caption)
-    if (nzchar(file)) return(file)
-
-    if (.Platform$OS.type == "windows" && exists("choose.files", where = asNamespace("utils"), mode = "function")) {
-      file_default <- if (dir.exists(default)) file.path(default, "*.*") else default
-      file <- tryCatch(utils::choose.files(default = file_default, caption = caption, multi = FALSE), error = function(e) character(0))
-      if (length(file) > 0 && !is.na(file[1]) && nzchar(file[1])) return(file[1])
-    }
-
-    if (exists("file.choose", where = asNamespace("base"), mode = "function")) {
-      file <- tryCatch(base::file.choose(), error = function(e) "")
-      if (nzchar(file)) return(file)
-    }
-
-    ""
-  }
-
   format_elapsed <- function(start_time) {
     if (is.null(start_time) || is.na(start_time)) return("N/A")
     secs <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
@@ -124,16 +31,16 @@ server <- function(input, output, session) {
   
   # --- UI BUTTON BROWSER EVENT OBSERVERS ---
   observeEvent(input$browse_root, {
-    dir <- pick_directory(default = input$root_dir, caption = "Select Root Folder Path")
-    if (!is.na(dir) && nzchar(dir)) {
-      updateTextInput(session, "root_dir", value = normalizePath(dir, winslash = "/", mustWork = FALSE))
+    file <- tryCatch(file.choose(), error = function(e) "")
+    if (nzchar(file)) {
+      updateTextInput(session, "root_dir", value = normalizePath(dirname(file), winslash = "/", mustWork = FALSE))
     }
   })
   
   observeEvent(input$browse_db, {
-    file <- pick_file(default = input$root_dir, caption = "Select Master Database File")
+    file <- tryCatch(file.choose(), error = function(e) "")
     
-    if (length(file) > 0 && !is.na(file) && nzchar(file)) {
+    if (nzchar(file)) {
       inputs_dir <- find_input_dir(input$root_dir)
       file_dir <- normalizePath(dirname(file), winslash = "/", mustWork = FALSE)
       
@@ -146,10 +53,9 @@ server <- function(input, output, session) {
   })
   
   observeEvent(input$browse_kcp, {
-    default_path <- if (!is.null(input$kcp_dir) && nzchar(trimws(input$kcp_dir))) input$kcp_dir else file.path(input$root_dir, "KCP_Catalog")
-    dir <- pick_directory(default = default_path, caption = "Select KCP Directory")
-    if (!is.na(dir) && nzchar(dir)) {
-      updateTextInput(session, "kcp_dir", value = normalizePath(dir, winslash = "/", mustWork = FALSE))
+    file <- tryCatch(file.choose(), error = function(e) "")
+    if (nzchar(file)) {
+      updateTextInput(session, "kcp_dir", value = normalizePath(dirname(file), winslash = "/", mustWork = FALSE))
     }
   })
   
