@@ -43,19 +43,23 @@ server <- function(input, output, session) {
     normalizePath(path, winslash = "/", mustWork = FALSE)
   }
 
-  pick_directory <- function(start_dir, caption) {
-    start_dir <- normalize_dir_input(start_dir, fallback = getwd())
+  as_windows_path <- function(path) {
+    gsub("/", "\\\\", normalize_dir_input(path), fixed = TRUE)
+  }
 
+  pick_directory <- function(start_dir, caption) {
+    start_dir_win <- as_windows_path(start_dir)
     selected <- ""
+
     if (.Platform$OS.type == "windows" && exists("choose.dir", where = asNamespace("utils"), mode = "function")) {
-      selected <- tryCatch(utils::choose.dir(default = start_dir, caption = caption), error = function(e) "")
+      selected <- tryCatch(utils::choose.dir(default = start_dir_win, caption = caption), error = function(e) "")
     }
 
     if (!nzchar(selected) && requireNamespace("tcltk", quietly = TRUE)) {
-      selected <- tryCatch(tcltk::tk_choose.dir(default = start_dir, caption = caption), error = function(e) "")
+      selected <- tryCatch(tcltk::tk_choose.dir(default = start_dir_win, caption = caption), error = function(e) "")
     }
 
-    if (!nzchar(selected)) return("")
+    if (is.null(selected) || is.na(selected) || !nzchar(trimws(as.character(selected)))) return("")
     normalizePath(selected, winslash = "/", mustWork = FALSE)
   }
 
@@ -178,16 +182,12 @@ server <- function(input, output, session) {
     list(root = root, db = db_default, kcp = kcp_default)
   }
 
-  defaults_initialized <- reactiveVal(FALSE)
-
-  observe({
-    if (isTRUE(defaults_initialized())) return()
+  session$onFlushed(function() {
     d <- derive_runtime_defaults(getwd())
-    updateTextInput(session, "root_dir", value = d$root)
-    updateTextInput(session, "master_db", value = d$db)
-    updateTextInput(session, "kcp_dir", value = d$kcp)
-    defaults_initialized(TRUE)
-  })
+    session$sendInputMessage("root_dir", list(value = d$root))
+    session$sendInputMessage("master_db", list(value = d$db))
+    session$sendInputMessage("kcp_dir", list(value = d$kcp))
+  }, once = TRUE)
   
   meta <- reactiveValues(groups = NULL, catalog = NULL, types = NULL)
   grid_data <- reactiveVal(data.frame())
