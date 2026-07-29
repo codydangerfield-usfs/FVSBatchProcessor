@@ -170,8 +170,37 @@ server <- function(input, output, session) {
     normalizePath(candidate_input_dirs[1], winslash = "/", mustWork = FALSE)
   }
 
+  find_kcp_dir <- function(root_dir) {
+    top_dirs <- tryCatch(list.dirs(root_dir, full.names = TRUE, recursive = FALSE), error = function(e) character(0))
+    if (length(top_dirs) == 0) return("")
+    top_dirs <- unique(normalizePath(top_dirs, winslash = "/", mustWork = FALSE))
+
+    kcp_matches <- top_dirs[grepl("kcp", basename(top_dirs), ignore.case = TRUE)]
+    exact_kcp <- kcp_matches[tolower(basename(kcp_matches)) %in% c("kcp", "kcp_catalog")]
+    if (length(exact_kcp) > 0) kcp_matches <- exact_kcp
+
+    if (length(kcp_matches) == 0) return("")
+    normalizePath(kcp_matches[1], winslash = "/", mustWork = FALSE)
+  }
+
+  detect_single_db_name <- function(root_dir) {
+    input_dir <- find_input_dir(root_dir)
+    if (!nzchar(input_dir)) return("<FVS_Input.db>")
+
+    available_dbs <- tryCatch(
+      list.files(input_dir, pattern = "\\.(db|sqlite)$", ignore.case = TRUE, full.names = FALSE),
+      error = function(e) character(0)
+    )
+    if (length(available_dbs) == 1) available_dbs[1] else "<FVS_Input.db>"
+  }
+
   resolve_db_path <- function(root_dir, db_name, slash = "/") {
     db_name <- trimws(db_name)
+
+    if (!nzchar(db_name) || grepl("^<.*>$", db_name)) {
+      db_name <- detect_single_db_name(root_dir)
+    }
+
     if (grepl("^([A-Za-z]:|\\\\|/)", db_name)) {
       normalizePath(db_name, winslash = slash, mustWork = FALSE)
     } else {
@@ -185,6 +214,12 @@ server <- function(input, output, session) {
   
   resolve_kcp_path <- function(root_dir, dir_name, slash = "/") {
     dir_name <- trimws(dir_name)
+
+    if (!nzchar(dir_name) || identical(dir_name, "KCP_Catalog")) {
+      detected_kcp <- find_kcp_dir(root_dir)
+      if (nzchar(detected_kcp)) dir_name <- detected_kcp
+    }
+
     if (grepl("^([A-Za-z]:|\\\\|/)", dir_name)) {
       normalizePath(dir_name, winslash = slash, mustWork = FALSE)
     } else {
@@ -199,21 +234,9 @@ server <- function(input, output, session) {
     top_dirs <- tryCatch(list.dirs(root, full.names = TRUE, recursive = FALSE), error = function(e) character(0))
     top_dirs <- unique(normalizePath(top_dirs, winslash = "/", mustWork = FALSE))
 
-    input_dir <- find_input_dir(root)
-    available_dbs <- if (nzchar(input_dir)) {
-      tryCatch(
-        list.files(input_dir, pattern = "\\.(db|sqlite)$", ignore.case = TRUE, full.names = FALSE),
-        error = function(e) character(0)
-      )
-    } else {
-      character(0)
-    }
-    db_default <- if (length(available_dbs) == 1) available_dbs[1] else "<FVS_Input.db>"
-
-    kcp_matches <- top_dirs[grepl("kcp", basename(top_dirs), ignore.case = TRUE)]
-    exact_kcp <- kcp_matches[tolower(basename(kcp_matches)) %in% c("kcp", "kcp_catalog")]
-    if (length(exact_kcp) > 0) kcp_matches <- exact_kcp
-    kcp_default <- if (length(kcp_matches) > 0) normalizePath(kcp_matches[1], winslash = "/", mustWork = FALSE) else "KCP_Catalog"
+    db_default <- detect_single_db_name(root)
+    kcp_detected <- find_kcp_dir(root)
+    kcp_default <- if (nzchar(kcp_detected)) kcp_detected else "KCP_Catalog"
 
     list(root = root, db = db_default, kcp = kcp_default)
   }
@@ -375,8 +398,27 @@ server <- function(input, output, session) {
   # Loads the available database context and dynamic KCP lookup combinations into a central reactive UI table
   observeEvent(input$load_metadata, {
     req(input$root_dir)
-    full_db_path <- resolve_db_path(input$root_dir, input$master_db)
-    full_kcp_dir <- resolve_kcp_path(input$root_dir, input$kcp_dir)
+
+    runtime_root <- normalizePath(trimws(input$root_dir), winslash = "/", mustWork = FALSE)
+    if (!nzchar(runtime_root)) runtime_root <- normalizePath(getwd(), winslash = "/", mustWork = FALSE)
+
+    runtime_db <- trimws(as.character(input$master_db))
+    if (!nzchar(runtime_db) || grepl("^<.*>$", runtime_db)) {
+      runtime_db <- detect_single_db_name(runtime_root)
+      updateTextInput(session, "master_db", value = runtime_db)
+    }
+
+    runtime_kcp <- trimws(as.character(input$kcp_dir))
+    if (!nzchar(runtime_kcp) || identical(runtime_kcp, "KCP_Catalog")) {
+      detected_kcp <- find_kcp_dir(runtime_root)
+      if (nzchar(detected_kcp)) {
+        runtime_kcp <- detected_kcp
+        updateTextInput(session, "kcp_dir", value = runtime_kcp)
+      }
+    }
+
+    full_db_path <- resolve_db_path(runtime_root, runtime_db)
+    full_kcp_dir <- resolve_kcp_path(runtime_root, runtime_kcp)
     
     if (!file.exists(full_db_path)) {
       showNotification("Database target not found at specified Root directory path.", type = "error")
