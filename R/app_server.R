@@ -78,14 +78,12 @@ server <- function(input, output, session) {
   }
 
   pick_directory <- function(default = ".", caption = "Select folder") {
+    dir <- pick_directory_ps(default = default, caption = caption)
+    if (!is.na(dir) && nzchar(dir)) return(normalizePath(dir, winslash = "/", mustWork = FALSE))
+
     if (.Platform$OS.type == "windows" && exists("choose.dir", where = asNamespace("utils"), mode = "function")) {
       dir <- tryCatch(utils::choose.dir(default = normalize_dialog_default(default), caption = caption), error = function(e) NA_character_)
       if (!is.na(dir) && nzchar(dir)) return(normalizePath(dir, winslash = "/", mustWork = FALSE))
-    }
-
-    if (requireNamespace("rstudioapi", quietly = TRUE) && isTRUE(rstudioapi::isAvailable())) {
-      dir <- tryCatch(rstudioapi::selectDirectory(path = default, caption = caption), error = function(e) NULL)
-      if (!is.null(dir) && nzchar(dir)) return(normalizePath(dir, winslash = "/", mustWork = FALSE))
     }
 
     if (requireNamespace("tcltk", quietly = TRUE)) {
@@ -97,15 +95,13 @@ server <- function(input, output, session) {
   }
 
   pick_file <- function(default = ".", caption = "Select file") {
+    file <- pick_file_ps(default = default, caption = caption)
+    if (nzchar(file)) return(file)
+
     if (.Platform$OS.type == "windows" && exists("choose.files", where = asNamespace("utils"), mode = "function")) {
       file_default <- if (dir.exists(default)) file.path(default, "*.*") else default
       file <- tryCatch(utils::choose.files(default = file_default, caption = caption, multi = FALSE), error = function(e) character(0))
       if (length(file) > 0 && !is.na(file[1]) && nzchar(file[1])) return(file[1])
-    }
-
-    if (requireNamespace("rstudioapi", quietly = TRUE) && isTRUE(rstudioapi::isAvailable())) {
-      file <- tryCatch(rstudioapi::selectFile(path = default, caption = caption), error = function(e) NULL)
-      if (!is.null(file) && nzchar(file)) return(file)
     }
 
     if (exists("file.choose", where = asNamespace("base"), mode = "function")) {
