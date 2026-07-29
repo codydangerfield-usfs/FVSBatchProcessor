@@ -174,6 +174,12 @@ server <- function(input, output, session) {
     updateTextInput(session, "kcp_dir", value = d$kcp)
     defaults_initialized(TRUE)
   })
+
+  observeEvent(input$root_dir, {
+    runtime_root <- normalize_dir_input(input$root_dir, fallback = getwd())
+    detected_db <- detect_single_db_name(runtime_root)
+    updateTextInput(session, "master_db", value = detected_db)
+  }, ignoreInit = TRUE)
   
   meta <- reactiveValues(groups = NULL, catalog = NULL, types = NULL)
   grid_data <- reactiveVal(data.frame())
