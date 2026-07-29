@@ -208,12 +208,16 @@ server <- function(input, output, session) {
     list(root = root, db = db_default, kcp = kcp_default)
   }
 
+  defaults_initialized <- reactiveVal(FALSE)
+
   observe({
+    if (isTRUE(defaults_initialized())) return()
     d <- derive_runtime_defaults(getwd())
     updateTextInput(session, "root_dir", value = d$root)
     updateTextInput(session, "master_db", value = d$db)
     updateTextInput(session, "kcp_dir", value = d$kcp)
-  }, once = TRUE)
+    defaults_initialized(TRUE)
+  })
   
   meta <- reactiveValues(groups = NULL, catalog = NULL, types = NULL)
   grid_data <- reactiveVal(data.frame())
