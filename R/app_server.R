@@ -19,6 +19,44 @@ server <- function(input, output, session) {
   prog_file_run <- tempfile(pattern = "run_", fileext = ".txt")
   prog_file_merge <- tempfile(pattern = "merge_", fileext = ".txt")
 
+  pick_directory <- function(default = ".", caption = "Select folder") {
+    if (requireNamespace("rstudioapi", quietly = TRUE) && isTRUE(rstudioapi::isAvailable())) {
+      dir <- tryCatch(rstudioapi::selectDirectory(path = default, caption = caption), error = function(e) NULL)
+      if (!is.null(dir) && nzchar(dir)) return(dir)
+    }
+
+    if (.Platform$OS.type == "windows" && exists("choose.dir", where = asNamespace("utils"), mode = "function")) {
+      dir <- tryCatch(utils::choose.dir(default = default, caption = caption), error = function(e) NA_character_)
+      if (!is.na(dir) && nzchar(dir)) return(dir)
+    }
+
+    if (requireNamespace("tcltk", quietly = TRUE)) {
+      dir <- tryCatch(tcltk::tk_choose.dir(default = default, caption = caption), error = function(e) NA_character_)
+      if (!is.na(dir) && nzchar(dir)) return(dir)
+    }
+
+    NA_character_
+  }
+
+  pick_file <- function(default = ".", caption = "Select file") {
+    if (requireNamespace("rstudioapi", quietly = TRUE) && isTRUE(rstudioapi::isAvailable())) {
+      file <- tryCatch(rstudioapi::selectFile(path = default, caption = caption), error = function(e) NULL)
+      if (!is.null(file) && nzchar(file)) return(file)
+    }
+
+    if (.Platform$OS.type == "windows" && exists("choose.files", where = asNamespace("utils"), mode = "function")) {
+      file <- tryCatch(utils::choose.files(default = default, caption = caption, multi = FALSE), error = function(e) character(0))
+      if (length(file) > 0 && !is.na(file[1]) && nzchar(file[1])) return(file[1])
+    }
+
+    if (exists("file.choose", where = asNamespace("base"), mode = "function")) {
+      file <- tryCatch(base::file.choose(), error = function(e) "")
+      if (nzchar(file)) return(file)
+    }
+
+    ""
+  }
+
   format_elapsed <- function(start_time) {
     if (is.null(start_time) || is.na(start_time)) return("N/A")
     secs <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
@@ -31,27 +69,16 @@ server <- function(input, output, session) {
   
   # --- UI BUTTON BROWSER EVENT OBSERVERS ---
   observeEvent(input$browse_root, {
-    if (!exists("choose.dir", where = asNamespace("utils"), mode = "function")) {
-      showNotification("Folder browser is unavailable in this R session.", type = "error")
-      return()
-    }
-    dir <- utils::choose.dir(default = input$root_dir, caption = "Select Root Folder Path")
+    dir <- pick_directory(default = input$root_dir, caption = "Select Root Folder Path")
     if (!is.na(dir) && nzchar(dir)) {
       updateTextInput(session, "root_dir", value = normalizePath(dir, winslash = "/", mustWork = FALSE))
+    } else {
+      showNotification("Folder picker is unavailable in this R session. Paste a full path manually.", type = "warning")
     }
   })
   
   observeEvent(input$browse_db, {
-    if (!exists("choose.files", where = asNamespace("utils"), mode = "function")) {
-      showNotification("File browser is unavailable in this R session.", type = "error")
-      return()
-    }
-    
-    file <- tryCatch({
-      file.choose()
-    }, error = function(e) {
-      return(character(0))
-    })
+    file <- pick_file(default = input$root_dir, caption = "Select Master Database File")
     
     if (length(file) > 0 && !is.na(file) && nzchar(file)) {
       inputs_dir <- normalizePath(file.path(input$root_dir, "Inputs"), winslash = "/", mustWork = FALSE)
@@ -62,18 +89,18 @@ server <- function(input, output, session) {
       } else {
         updateTextInput(session, "master_db", value = normalizePath(file, winslash = "/", mustWork = FALSE))
       }
+    } else {
+      showNotification("File picker is unavailable in this R session. Paste a full file path manually.", type = "warning")
     }
   })
   
   observeEvent(input$browse_kcp, {
-    if (!exists("choose.dir", where = asNamespace("utils"), mode = "function")) {
-      showNotification("Folder browser is unavailable in this R session.", type = "error")
-      return()
-    }
     default_path <- file.path(input$root_dir, "KCP_Catalog")
-    dir <- utils::choose.dir(default = default_path, caption = "Select KCP Directory")
+    dir <- pick_directory(default = default_path, caption = "Select KCP Directory")
     if (!is.na(dir) && nzchar(dir)) {
       updateTextInput(session, "kcp_dir", value = normalizePath(dir, winslash = "/", mustWork = FALSE))
+    } else {
+      showNotification("Folder picker is unavailable in this R session. Paste a full path manually.", type = "warning")
     }
   })
   

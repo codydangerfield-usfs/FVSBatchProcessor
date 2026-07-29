@@ -259,7 +259,7 @@ ui <- page_fillable(
               # h5("Workflow Diagram"),
               tags$figure(
                 tags$img(
-                  src = paste0("workflow_assets/", WorkflowImageFile),
+                  src = paste0(WorkflowResourcePrefix, "/", WorkflowImageFile),
                   alt = "FVS batch processing workflow diagram",
                   style = "display: block; margin: 0 auto; width: 100%; max-width: 1800px; height: auto; border: 1px solid #d9d9d9; border-radius: 6px;"
                 ),

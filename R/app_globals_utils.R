@@ -14,20 +14,34 @@ RunBaseDir <- file.path(RootDir, "rFVS_Runs")
 ManifestFile <- file.path(RunBaseDir, "KCP_AddFile_Manifest.csv")
 # Set a visual icon/workflow diagram image name
 WorkflowImageFile <- "FVS_BatchProcessing_WorkflowDiagram_v3.png"
+WorkflowResourcePrefix <- "fvsbp_workflow_assets"
 
-# Define possible directories to locate the workflow diagram
-workflow_img_dirs <- c(
-  system.file("app/www", package = "FVSBatchProcessor"),
-  file.path(getwd(), "www"),
-  file.path(getwd(), "Scripts", "www"),
-  file.path(RootDir, "Scripts", "www")
-)
-# Match the first location that contains the image file
-workflow_img_dir <- workflow_img_dirs[file.exists(file.path(workflow_img_dirs, WorkflowImageFile))][1]
-# If found, add it as a resource path available to the Shiny client UI
-if (!is.na(workflow_img_dir) && nzchar(workflow_img_dir)) {
-  shiny::addResourcePath("workflow_assets", normalizePath(workflow_img_dir, winslash = "/", mustWork = TRUE))
+# Registers the workflow image directory under a stable Shiny resource prefix.
+register_workflow_assets <- function() {
+  workflow_img_dirs <- c(
+    system.file("app/www", package = "FVSBatchProcessor"),
+    file.path(getwd(), "inst", "app", "www"),
+    file.path(getwd(), "app", "www"),
+    file.path(getwd(), "www"),
+    file.path(getwd(), "Scripts", "www"),
+    file.path(RootDir, "Scripts", "www")
+  )
+
+  workflow_img_dir <- workflow_img_dirs[file.exists(file.path(workflow_img_dirs, WorkflowImageFile))][1]
+  if (is.na(workflow_img_dir) || !nzchar(workflow_img_dir)) return(FALSE)
+
+  normalized <- normalizePath(workflow_img_dir, winslash = "/", mustWork = TRUE)
+  current_paths <- shiny::resourcePaths()
+
+  if (!WorkflowResourcePrefix %in% names(current_paths)) {
+    shiny::addResourcePath(WorkflowResourcePrefix, normalized)
+    return(TRUE)
+  }
+
+  identical(normalizePath(current_paths[[WorkflowResourcePrefix]], winslash = "/", mustWork = FALSE), normalized)
 }
+
+register_workflow_assets()
 
 # Determine default master database file based on contents of Inputs folder
 InputsDir <- file.path(RootDir, "Inputs")

@@ -12,6 +12,10 @@ run_app <- function(launch.browser = TRUE, ...) {
     )
   }
 
+  if (exists("register_workflow_assets", mode = "function")) {
+    register_workflow_assets()
+  }
+
   shiny::runApp(
     shiny::shinyApp(ui = ui, server = server),
     launch.browser = launch.browser,
