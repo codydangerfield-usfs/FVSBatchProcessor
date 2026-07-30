@@ -31,10 +31,6 @@ server <- function(input, output, session) {
   
   # --- SHINY-NATIVE PICKER FLOWS ---
 
-  sys_volumes <- c("Current Workspace" = getwd(), shinyFiles::getVolumes()())
-  shinyFiles::shinyDirChoose(input, "browse_root", roots = sys_volumes)
-  shinyFiles::shinyDirChoose(input, "browse_kcp", roots = sys_volumes)
-
   normalize_dir_input <- function(path, fallback = getwd()) {
     if (is.null(path) || length(path) == 0 || is.na(path[1])) {
       path <- ""
@@ -47,20 +43,16 @@ server <- function(input, output, session) {
   }
 
   observeEvent(input$browse_root, {
-    if (!is.integer(input$browse_root)) {
-      selected_dir <- shinyFiles::parseDirPath(sys_volumes, input$browse_root)
-      if (length(selected_dir) > 0 && nzchar(selected_dir[1])) {
-        updateTextInput(session, "root_dir", value = normalizePath(selected_dir[1], winslash = "/", mustWork = FALSE))
-      }
+    dir <- choose_directory_universal(caption = "Select Root Folder Path")
+    if (!is.null(dir) && nzchar(dir)) {
+      updateTextInput(session, "root_dir", value = normalizePath(dir, winslash = "/", mustWork = FALSE))
     }
   })
 
   observeEvent(input$browse_kcp, {
-    if (!is.integer(input$browse_kcp)) {
-      selected_dir <- shinyFiles::parseDirPath(sys_volumes, input$browse_kcp)
-      if (length(selected_dir) > 0 && nzchar(selected_dir[1])) {
-        updateTextInput(session, "kcp_dir", value = normalizePath(selected_dir[1], winslash = "/", mustWork = FALSE))
-      }
+    dir <- choose_directory_universal(caption = "Select KCP Directory")
+    if (!is.null(dir) && nzchar(dir)) {
+      updateTextInput(session, "kcp_dir", value = normalizePath(dir, winslash = "/", mustWork = FALSE))
     }
   })
 

@@ -36,7 +36,85 @@ register_workflow_assets()
 
 # We no longer calculate DefaultDB, DefaultKCP, RootDir or ManifestFile at package compilation time
 # since they depend on the runtime environment directory. These values will be dynamically generated 
-# inside the shiny server session.
+# Inside shiny server session.
+
+#' Universal Native Directory Picker
+#' Works across Windows, macOS, and Linux.
+#' Works in RStudio, VS Code, R terminal, and non-interactive scripts.
+#' 
+#' @param caption The text to display on the dialog window
+#' @return The selected folder path as a string, or NULL if canceled
+choose_directory_universal <- function(caption = "Select a directory") {
+  os <- Sys.info()[["sysname"]]
+  path <- NULL
+  
+  if (os == "Windows") {
+    # PowerShell: Forces the standard Windows folder browser to the very front
+    ps_code <- sprintf('
+      Add-Type -AssemblyName System.Windows.Forms
+      $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+      $dialog.Description = "%s"
+      $dialog.ShowNewFolderButton = $true
+      $topMost = New-Object System.Windows.Forms.Form
+      $topMost.TopMost = $true
+      $result = $dialog.ShowDialog($topMost)
+      if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+        Write-Output $dialog.SelectedPath
+      }
+    ', caption)
+    
+    res <- tryCatch(
+      system2("powershell", 
+              args = c("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", shQuote(ps_code)), 
+              stdout = TRUE, stderr = FALSE),
+      error = function(e) NULL
+    )
+    if (length(res) > 0 && nzchar(res[1])) path <- res[1]
+    
+  } else if (os == "Darwin") {
+    # macOS: Uses AppleScript. 
+    # 'path to frontmost application' ensures it pops up over VS Code/RStudio
+    script <- sprintf('
+      try
+        tell application (path to frontmost application as text)
+          set myFolder to choose folder with prompt "%s"
+        end tell
+        POSIX path of myFolder
+      end try
+    ', caption)
+    
+    res <- tryCatch(
+      system2("osascript", args = c("-e", shQuote(script)), stdout = TRUE, stderr = FALSE),
+      error = function(e) NULL
+    )
+    if (length(res) > 0 && !grepl("user canceled", res[1], ignore.case = TRUE)) path <- res[1]
+    
+  } else if (os == "Linux") {
+    # Linux: Tries Zenity (standard on Ubuntu/GNOME), falls back to tcltk
+    if (nzchar(Sys.which("zenity"))) {
+      res <- tryCatch(
+        system2("zenity", 
+                args = c("--file-selection", "--directory", sprintf('--title="%s"', caption)), 
+                stdout = TRUE, stderr = FALSE),
+        error = function(e) NULL
+      )
+      if (length(res) > 0 && nzchar(res[1])) path <- res[1]
+    } else {
+      # Fallback for minimal Linux environments
+      if (requireNamespace("tcltk", quietly = TRUE)) {
+        path <- tcltk::tk_chooseDir(caption = caption)
+      }
+    }
+  }
+  
+  # Clean up response if user clicked Cancel or closed the window
+  if (is.null(path) || length(path) == 0 || path == "" || is.na(path)) {
+    return(NULL)
+  }
+  
+  # Normalize path slashes (changes Windows C:\\ to C:/ for R compatibility)
+  return(normalizePath(as.character(path), winslash = "/", mustWork = FALSE))
+}
 
 # Helper function to remove leading numbers and special characters from a folder name
 clean_kcp_type <- function(folder_name) {
