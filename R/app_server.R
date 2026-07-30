@@ -31,7 +31,7 @@ server <- function(input, output, session) {
   
   # --- SHINY-NATIVE PICKER FLOWS ---
 
-  normalize_dir_input <- function(path, fallback = getwd()) {
+  normalize_dir_input <- function(path, fallback = getShinyOption("FVS_USER_WD", default = getwd())) {
     if (is.null(path) || length(path) == 0 || is.na(path[1])) {
       path <- ""
     } else {
@@ -165,16 +165,26 @@ server <- function(input, output, session) {
 
   observe({
     if (isTRUE(defaults_initialized())) return()
-    d <- derive_runtime_defaults(getwd())
+    
+    # Use FVS_USER_WD instead of getwd() to track where the script was launched from vs the package root
+    caller_wd <- getShinyOption("FVS_USER_WD", default = getwd())
+    
+    d <- derive_runtime_defaults(caller_wd)
     if (!nzchar(trimws(as.character(d$db)))) d$db <- "<FVS_Input.db>"
     updateTextInput(session, "root_dir", value = d$root)
     updateTextInput(session, "master_db", value = d$db)
     updateTextInput(session, "kcp_dir", value = d$kcp)
+    
+    # Inject initial DB string into fileInput UI via frontend DOM manipulation
+    if (d$db != "<FVS_Input.db>") {
+      shinyjs::runjs(sprintf("setTimeout(function() { $('#master_db_upload').closest('.input-group').find('input[type=\"text\"]').val('%s'); }, 500);", d$db))
+    }
+    
     defaults_initialized(TRUE)
   })
 
   observeEvent(input$root_dir, {
-    runtime_root <- normalize_dir_input(input$root_dir, fallback = getwd())
+    runtime_root <- normalize_dir_input(input$root_dir, fallback = getShinyOption("FVS_USER_WD", default = getwd()))
     detected_db <- detect_single_db_name(runtime_root)
     if (!nzchar(trimws(as.character(detected_db)))) detected_db <- "<FVS_Input.db>"
     
@@ -332,7 +342,7 @@ server <- function(input, output, session) {
     req(input$root_dir)
 
     runtime_root <- normalizePath(trimws(input$root_dir), winslash = "/", mustWork = FALSE)
-    if (!nzchar(runtime_root)) runtime_root <- normalizePath(getwd(), winslash = "/", mustWork = FALSE)
+    if (!nzchar(runtime_root)) runtime_root <- normalizePath(getShinyOption("FVS_USER_WD", default = getwd()), winslash = "/", mustWork = FALSE)
 
     runtime_db <- trimws(as.character(input$master_db))
     if (!nzchar(runtime_db) || grepl("^<.*>$", runtime_db)) {
