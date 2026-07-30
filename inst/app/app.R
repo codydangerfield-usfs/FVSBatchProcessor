@@ -718,7 +718,12 @@ server <- function(input, output, session) {
       showNotification("Folder browser is unavailable in this R session.", type = "error")
       return()
     }
-    dir <- utils::choose.dir(default = input$root_dir, caption = "Select Root Folder Path")
+    
+    # choose.dir SILENTLY FAILS if the default path doesn't exist. Fallback to getwd()
+    def_dir <- input$root_dir
+    if (is.null(def_dir) || !dir.exists(def_dir)) def_dir <- getwd()
+    
+    dir <- utils::choose.dir(default = def_dir, caption = "Select Root Folder Path")
     if (!is.na(dir) && nzchar(dir)) {
       updateTextInput(session, "root_dir", value = normalizePath(dir, winslash = "/", mustWork = FALSE))
     }
@@ -763,7 +768,12 @@ server <- function(input, output, session) {
       showNotification("Folder browser is unavailable in this R session.", type = "error")
       return()
     }
+    
+    # choose.dir SILENTLY FAILS if the default path doesn't exist. Fallback to standard paths
     default_path <- file.path(input$root_dir, "KCP_Catalog")
+    if (!dir.exists(default_path)) default_path <- input$root_dir
+    if (is.null(default_path) || !dir.exists(default_path)) default_path <- getwd()
+    
     dir <- utils::choose.dir(default = default_path, caption = "Select KCP Directory")
     if (!is.na(dir) && nzchar(dir)) {
       updateTextInput(session, "kcp_dir", value = normalizePath(dir, winslash = "/", mustWork = FALSE))
