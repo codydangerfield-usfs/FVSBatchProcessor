@@ -18,7 +18,7 @@
 # --- AUTOLOAD PACKAGES ---
 cran_packages <- c(
   "shiny", "bslib", "RSQLite", "rhandsontable", 
-  "openxlsx", "foreach", "doSNOW", "uuid", "zip", "shinyjs", "dplyr", "callr"
+  "openxlsx", "foreach", "doSNOW", "uuid", "zip", "shinyjs", "dplyr", "callr", "shinyFiles"
 )
 
 new_packages <- cran_packages[!(cran_packages %in% installed.packages()[,"Package"])]
@@ -454,11 +454,12 @@ ui <- page_fillable(
         
         tags$label("Root Folder Path", class = "form-label", `for` = "root_dir"),
         div(class = "input-group mb-3",
-            tags$button(
+            shinyFiles::shinyDirButton(
               id = "browse_root",
-              type = "button",
-              class = "btn btn-default action-button",
-              "Browse..."
+              label = "Browse...",
+              title = "Select Root Folder Path",
+              buttonType = "default",
+              class = "action-button"
             ),
             tags$input(
               id = "root_dir",
@@ -475,11 +476,12 @@ ui <- page_fillable(
         
         tags$label("KCP Directory Name", class = "form-label", `for` = "kcp_dir"),
         div(class = "input-group mb-3",
-            tags$button(
+            shinyFiles::shinyDirButton(
               id = "browse_kcp",
-              type = "button",
-              class = "btn btn-default action-button",
-              "Browse..."
+              label = "Browse...",
+              title = "Select KCP Directory",
+              buttonType = "default",
+              class = "action-button"
             ),
             tags$input(
               id = "kcp_dir",
@@ -713,21 +715,17 @@ server <- function(input, output, session) {
   
   # --- UI BUTTON BROWSER EVENT OBSERVERS ---
   
+  sys_volumes <- c("Current Workspace" = getwd(), shinyFiles::getVolumes()())
+  shinyFiles::shinyDirChoose(input, "browse_root", roots = sys_volumes)
+  
   observeEvent(input$browse_root, {
-    if (!exists("choose.dir", where = asNamespace("utils"), mode = "function")) {
-      showNotification("Folder browser is unavailable in this R session.", type = "error")
-      return()
+    if (!is.integer(input$browse_root)) {
+      selected_dir <- shinyFiles::parseDirPath(sys_volumes, input$browse_root)
+      if (length(selected_dir) > 0 && nzchar(selected_dir[1])) {
+        updateTextInput(session, "root_dir", value = normalizePath(selected_dir[1], winslash = "/", mustWork = FALSE))
+      }
     }
-    
-    # choose.dir SILENTLY FAILS if the default path doesn't exist. Fallback to getwd()
-    def_dir <- input$root_dir
-    if (is.null(def_dir) || !dir.exists(def_dir)) def_dir <- getwd()
-    
-    dir <- utils::choose.dir(default = def_dir, caption = "Select Root Folder Path")
-    if (!is.na(dir) && nzchar(dir)) {
-      updateTextInput(session, "root_dir", value = normalizePath(dir, winslash = "/", mustWork = FALSE))
-    }
-  })
+  }, ignoreInit = TRUE)
   
   observeEvent(input$master_db_upload, {
     file_info <- input$master_db_upload
@@ -763,20 +761,14 @@ server <- function(input, output, session) {
     }
   }, ignoreInit = TRUE)
   
+  shinyFiles::shinyDirChoose(input, "browse_kcp", roots = sys_volumes)
+  
   observeEvent(input$browse_kcp, {
-    if (!exists("choose.dir", where = asNamespace("utils"), mode = "function")) {
-      showNotification("Folder browser is unavailable in this R session.", type = "error")
-      return()
-    }
-    
-    # choose.dir SILENTLY FAILS if the default path doesn't exist. Fallback to standard paths
-    default_path <- file.path(input$root_dir, "KCP_Catalog")
-    if (!dir.exists(default_path)) default_path <- input$root_dir
-    if (is.null(default_path) || !dir.exists(default_path)) default_path <- getwd()
-    
-    dir <- utils::choose.dir(default = default_path, caption = "Select KCP Directory")
-    if (!is.na(dir) && nzchar(dir)) {
-      updateTextInput(session, "kcp_dir", value = normalizePath(dir, winslash = "/", mustWork = FALSE))
+    if (!is.integer(input$browse_kcp)) {
+      selected_dir <- shinyFiles::parseDirPath(sys_volumes, input$browse_kcp)
+      if (length(selected_dir) > 0 && nzchar(selected_dir[1])) {
+        updateTextInput(session, "kcp_dir", value = normalizePath(selected_dir[1], winslash = "/", mustWork = FALSE))
+      }
     }
   })
   
