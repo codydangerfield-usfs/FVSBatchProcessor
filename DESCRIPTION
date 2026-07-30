@@ -27,7 +27,8 @@ Imports:
     DBI,
     parallel,
     tools,
-    rFVS
+    rFVS,
+    shinyFiles
 Suggests:
     remotes
 Remotes:
