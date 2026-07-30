@@ -96,11 +96,11 @@ ui <- page_fillable(
         
         tags$label("Root Folder Path", class = "form-label", `for` = "root_dir"),
         div(class = "input-group mb-3",
-            tags$button(
-              id = "browse_root",
-              type = "button",
-              class = "btn btn-default action-button",
-              "Browse..."
+            shinyFiles::shinyDirButton(
+              "browse_root",
+              "Browse...",
+              "Select Root Folder Path",
+              class = "btn btn-default action-button"
             ),
             tags$input(
               id = "root_dir",
@@ -117,11 +117,11 @@ ui <- page_fillable(
         
         tags$label("KCP Directory Name", class = "form-label", `for` = "kcp_dir"),
         div(class = "input-group mb-3",
-            tags$button(
-              id = "browse_kcp",
-              type = "button",
-              class = "btn btn-default action-button",
-              "Browse..."
+            shinyFiles::shinyDirButton(
+              "browse_kcp",
+              "Browse...",
+              "Select KCP Directory",
+              class = "btn btn-default action-button"
             ),
             tags$input(
               id = "kcp_dir",
