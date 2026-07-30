@@ -1,690 +1,6 @@
-# ---- FVS Batch Processor Shiny Application ----
-# Description:
-# This script provides an interactive R Shiny application to streamline 
-# the Forest Vegetation Simulator (FVS) batch processing workflow. It allows users to:
-#   1. Link to a master SQLite database for STAND and TREE initialization data.
-#   2. Dynamically build Group/Prescription scenarios and map KCP keyword files.
-#   3. Auto-generate standalone run.key FVS configuration files across isolated stand folders.
-#   4. Execute parallel rFVS simulations utilizing worker core clusters.
-#   5. Consolidate stand-level SQLite output databases back into merged master scenario databases.
-#
-# Outputs include generated .key files, temporary individual stand databases, 
-# and final merged SQLite output databases per Group/Prescription.
-#
-# Author: Cody Dangerfield
-# Last Updated: July 29, 2026
-# ------------------------------------------------------------------------------
+﻿# Auto-generated from rFVS_BatchProcessor_rShiny_v2.R
+# Split for package structure on 2026-07-29 11:06:54
 
-# --- AUTOLOAD PACKAGES ---
-cran_packages <- c(
-  "shiny", "bslib", "RSQLite", "rhandsontable", 
-  "openxlsx", "foreach", "doSNOW", "uuid", "zip", "shinyjs", "dplyr", "callr", "shinyFiles"
-)
-
-new_packages <- cran_packages[!(cran_packages %in% installed.packages()[,"Package"])]
-if (length(new_packages)) install.packages(new_packages, dependencies = TRUE)
-
-if (!requireNamespace("rFVS", quietly = TRUE)) {
-  if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes")
-  remotes::install_github("USDAForestService/ForestVegetationSimulator-Interface", subdir = "rFVS")
-}
-
-# Load all required packages (including base R and custom packages like rFVS)
-all_packages <- c(cran_packages, "tools", "parallel", "rFVS")
-invisible(lapply(all_packages, library, character.only = TRUE))
-
-# ------------------------------------------------------------------------------
-# 1. GLOBAL SETTINGS & UTILITIES
-# ------------------------------------------------------------------------------
-# Increase maximum upload size to 10GB for very large database/file transfers
-options(shiny.maxRequestSize = 10000 * 1024^2)
-
-# Determine root directory dynamically via shinyOptions, falling back to current dir
-caller_wd <- getShinyOption("FVS_USER_WD", default = getwd())
-RootDir <- normalizePath(caller_wd, winslash = "/", mustWork = FALSE)
-# Define where simulation runs will be hosted
-RunBaseDir <- file.path(RootDir, "rFVS_Runs")
-# Set path for the KCP combinations manifest file
-ManifestFile <- file.path(RunBaseDir, "KCP_AddFile_Manifest.csv")
-# Set a visual icon/workflow diagram image name
-WorkflowImageFile <- "FVS_BatchProcessing_WorkflowDiagram_v3.png"
-
-# Define possible directories to locate the workflow diagram
-workflow_img_dirs <- c(
-  file.path(getwd(), "www"),
-  file.path(getwd(), "Scripts", "www"),
-  file.path(RootDir, "Scripts", "www")
-)
-# Match the first location that contains the image file
-workflow_img_dir <- workflow_img_dirs[file.exists(file.path(workflow_img_dirs, WorkflowImageFile))][1]
-# If found, add it as a resource path available to the Shiny client UI
-if (!is.na(workflow_img_dir) && nzchar(workflow_img_dir)) {
-  shiny::addResourcePath("workflow_assets", normalizePath(workflow_img_dir, winslash = "/", mustWork = TRUE))
-}
-
-# Determine default master database file based on contents of Inputs folder
-InputsDir <- file.path(RootDir, "Inputs")
-available_dbs <- list.files(InputsDir, pattern = "\\.(db|sqlite)$", ignore.case = TRUE, full.names = FALSE)
-DefaultDB <- if (length(available_dbs) > 0) available_dbs[1] else "AllBKNF_Combined.db"
-
-# Determine default KCP directory based on contents of RootDir
-available_dirs <- list.dirs(RootDir, full.names = FALSE, recursive = FALSE)
-kcp_matches <- available_dirs[grepl("KCP", available_dirs, ignore.case = TRUE)]
-DefaultKCP <- if (length(kcp_matches) > 0) kcp_matches[1] else "KCP_Catalog"
-
-# Ensure the base directory for runs exists
-if (!dir.exists(RunBaseDir)) dir.create(RunBaseDir, recursive = TRUE, showWarnings = FALSE)
-
-# Helper function to remove leading numbers and special characters from a folder name
-clean_kcp_type <- function(folder_name) {
-  cleaned <- sub("^\\d+[_ -]*", "", folder_name)
-  make.names(cleaned, unique = TRUE)
-}
-
-# Helper function to wrap identifiers in quotes safely for SQL syntax
-quote_sql_identifier <- function(x) {
-  paste0("\"", gsub("\"", "\"\"", x), "\"")
-}
-
-# Recursively scans the master KCP directory structure to build a catalog dataframe of all .kcp files
-discover_kcp_catalog <- function(master_dir) {
-  if (!dir.exists(master_dir)) return(NULL)
-  type_dirs <- list.dirs(master_dir, full.names = TRUE, recursive = FALSE)
-  if (length(type_dirs) == 0) return(NULL)
-  
-  catalog <- do.call(rbind, lapply(seq_along(type_dirs), function(i) {
-    type_dir <- normalizePath(type_dirs[i], winslash = "/", mustWork = TRUE)
-    kcp_files <- list.files(type_dir, pattern = "\\.kcp$", full.names = TRUE, ignore.case = TRUE)
-    
-    if (length(kcp_files) == 0) {
-      return(data.frame(
-        TypeOrder = i,
-        KCP_Type = clean_kcp_type(basename(type_dir)),
-        Folder = basename(type_dir),
-        KCP_Name = NA_character_,
-        KCP_Path = NA_character_,
-        stringsAsFactors = FALSE
-      ))
-    }
-    
-    data.frame(
-      TypeOrder = i,
-      KCP_Type = clean_kcp_type(basename(type_dir)),
-      Folder = basename(type_dir),
-      KCP_Name = tools::file_path_sans_ext(basename(kcp_files)),
-      KCP_Path = normalizePath(kcp_files, winslash = "/"),
-      stringsAsFactors = FALSE
-    )
-  }))
-  if (!is.null(catalog)) catalog[order(catalog$TypeOrder, catalog$KCP_Name), ] else NULL
-}
-
-# Connects to SQLite DB and retrieves unique group strings, ignoring 'excluded_groups'
-get_groups_from_db <- function(db_path, table_name, group_col, excluded_groups) {
-  if (!file.exists(db_path)) return(character(0))
-  con <- dbConnect(SQLite(), db_path)
-  on.exit(dbDisconnect(con), add = TRUE) # Ensure we close the DB connection automatically 
-  
-  # Ensure the target table actually exists
-  if (!dbExistsTable(con, table_name)) {
-    stop(sprintf("Table '%s' could not be found in the database. Please check the 'Stand Initialization Table' name.", table_name))
-  }
-  
-  # Ensure the grouping column exists in the table
-  table_cols <- dbListFields(con, table_name)
-  if (!(group_col %in% table_cols)) {
-    stop(sprintf("Column '%s' could not be found in the table '%s'. Please check the 'Database Grouping Column' name.", group_col, table_name))
-  }
-  
-  # Execute select distinct query on the grouping column
-  sql <- sprintf("SELECT DISTINCT %s AS GROUP_CODE FROM %s", quote_sql_identifier(group_col), quote_sql_identifier(table_name))
-  groups <- dbGetQuery(con, sql)$GROUP_CODE
-  groups <- as.character(groups)
-  
-  # Filter out empty strings, NA, or user excluded groups (e.g. 'Riparian')
-  groups <- groups[!is.na(groups) & nzchar(trimws(groups))]
-  groups <- groups[!(tolower(groups) %in% tolower(excluded_groups))]
-  sort(unique(groups))
-}
-
-# Splits concatenated multiple string KCP entries inside a cell
-split_kcp_cell <- function(x) {
-  if (is.null(x) || is.na(x) || !nzchar(trimws(x))) return(character(0))
-  values <- unlist(strsplit(as.character(x), "\\s*[;,|]\\s*", perl = TRUE))
-  values <- values[nzchar(trimws(values))]
-  tools::file_path_sans_ext(values)
-}
-
-# Utility function that defines Scenario from GROUP_CODE plus either:
-# 1) user-selected columns, or 2) default Prescription-like column fallback.
-recalculate_scenarios <- function(df, old_df = NULL, scenario_cols = NULL, force_auto = FALSE) {
-  if (nrow(df) == 0) return(df)
-
-  # Resolve effective columns: user selection wins; otherwise fall back to Prescription-like column.
-  valid_extra_cols <- intersect(as.character(scenario_cols), names(df))
-  valid_extra_cols <- setdiff(valid_extra_cols, c("GROUP_CODE", "Scenario"))
-  if (length(valid_extra_cols) == 0) {
-    rx_match <- names(df)[grep("prescription", names(df), ignore.case = TRUE)]
-    if (length(rx_match) > 0) valid_extra_cols <- rx_match[1]
-  }
-  
-  is_empty_grp <- is.na(df$GROUP_CODE) | trimws(as.character(df$GROUP_CODE)) == ""
-
-  # Build suffix from selected/fallback columns. If all are blank, use _NG.
-  if (length(valid_extra_cols) > 0) {
-    suffix_vals <- vapply(seq_len(nrow(df)), function(i) {
-      vals <- trimws(as.character(unlist(df[i, valid_extra_cols, drop = FALSE], use.names = FALSE)))
-      vals <- vals[!is.na(vals) & nzchar(vals)]
-      if (length(vals) == 0) "_NG" else paste0("_", paste(vals, collapse = "_"))
-    }, character(1))
-    auto_scen <- ifelse(is_empty_grp, "", paste0(trimws(df$GROUP_CODE), suffix_vals))
-  } else {
-    auto_scen <- ifelse(is_empty_grp, "", paste0(trimws(df$GROUP_CODE), "_NG"))
-  }
-  
-  if (!("Scenario" %in% names(df))) {
-    df$Scenario <- ""
-  }
-
-  # Force full replacement when naming rules are intentionally changed by the user.
-  if (isTRUE(force_auto)) {
-    df$Scenario <- auto_scen
-    return(df)
-  }
-  
-  if (is.null(old_df)) {
-    for (i in seq_len(nrow(df))) {
-      if (is.na(df$Scenario[i]) || trimws(df$Scenario[i]) == "") {
-        df$Scenario[i] <- auto_scen[i]
-      }
-    }
-  } else {
-    for (i in seq_len(nrow(df))) {
-      if (i > nrow(old_df)) {
-        if (is.na(df$Scenario[i]) || trimws(df$Scenario[i]) == "") {
-          df$Scenario[i] <- auto_scen[i]
-        }
-      } else {
-        group_changed <- !identical(as.character(df$GROUP_CODE[i]), as.character(old_df$GROUP_CODE[i]))
-        cols_changed <- FALSE
-        for (col_name in valid_extra_cols) {
-          if (!identical(as.character(df[[col_name]][i]), as.character(old_df[[col_name]][i]))) {
-            cols_changed <- TRUE
-            break
-          }
-        }
-        scen_edited <- !identical(as.character(df$Scenario[i]), as.character(old_df$Scenario[i]))
-        
-        if (group_changed || cols_changed) {
-          df$Scenario[i] <- auto_scen[i]
-        } else if (scen_edited) {
-          df$Scenario[i] <- df$Scenario[i]
-        } else if (is.na(df$Scenario[i]) || trimws(df$Scenario[i]) == "") {
-          df$Scenario[i] <- auto_scen[i]
-        }
-      }
-    }
-  }
-  return(df)
-}
-
-# Deep cleans exported xlsx files to remove legacy drawings that corrupt rhandsontable formatting/export functionality
-strip_missing_drawing_relationships <- function(xlsx_path) {
-  tmp_dir <- tempfile("xlsx_clean_"); dir.create(tmp_dir); on.exit(unlink(tmp_dir, recursive = TRUE, force = TRUE), add = TRUE)
-  unzip(xlsx_path, exdir = tmp_dir)
-  rel_dir <- file.path(tmp_dir, "xl", "worksheets", "_rels")
-  if (!dir.exists(rel_dir)) return(invisible(TRUE))
-  rel_files <- list.files(rel_dir, pattern = "\\.rels$", full.names = TRUE)
-  for (rel_file in rel_files) {
-    rel_xml <- paste(readLines(rel_file, warn = FALSE), collapse = "")
-    rel_xml <- gsub('<Relationship[^>]+Type="[^"]+/drawing"[^>]+Target="\\.\\./drawings/drawing[0-9]+\\.xml"[^>]*/>', "", rel_xml)
-    rel_xml <- gsub('<Relationship[^>]+Type="[^"]+/vmlDrawing"[^>]+Target="\\.\\./drawings/vmlDrawing[0-9]+\\.vml"[^>]*/>', "", rel_xml)
-    writeLines(rel_xml, rel_file, useBytes = TRUE)
-  }
-  sheet_files <- list.files(file.path(tmp_dir, "xl", "worksheets"), pattern = "^sheet[0-9]+\\.xml$", full.names = TRUE)
-  for (sheet_file in sheet_files) {
-    sheet_xml <- paste(readLines(sheet_file, warn = FALSE), collapse = "")
-    sheet_xml <- gsub('<drawing[^>]*/>', "", sheet_xml)
-    sheet_xml <- gsub('<legacyDrawing[^>]*/>', "", sheet_xml)
-    writeLines(sheet_xml, sheet_file, useBytes = TRUE)
-  }
-  zip::zipr(zipfile = xlsx_path, files = list.files(tmp_dir, recursive = TRUE, all.files = TRUE, no.. = TRUE), root = tmp_dir, mode = "mirror")
-}
-
-# Function to construct a formatted Excel workbook with predefined drop-down options for mapped KCP scenarios
-create_lookup_wb <- function(df_export, meta_info, scenario_cols = NULL) {
-  df_export$Scenario <- ""
-  wb <- createWorkbook()
-  addWorksheet(wb, "Lookup", gridLines = TRUE)
-  addWorksheet(wb, "Options", gridLines = FALSE)
-  
-  # Prevent group strings that contain numbers from incrementing automatically inside Excel by converting to numeric explicitly if valid.
-  numeric_group <- suppressWarnings(as.numeric(df_export$GROUP_CODE))
-  if (!any(is.na(numeric_group))) {
-    df_export$GROUP_CODE <- numeric_group
-  }
-  
-  # Output the template structure layout into the primary mapped worksheet 
-  writeDataTable(wb, sheet = "Lookup", x = df_export, tableName = "KCP_Lookup", withFilter = TRUE, tableStyle = "TableStyleMedium2")
-  
-  lookup_columns <- names(df_export)
-  group_col_idx <- match("GROUP_CODE", lookup_columns)
-
-  # Resolve effective Scenario columns for workbook formulas.
-  effective_scenario_cols <- intersect(as.character(scenario_cols), lookup_columns)
-  effective_scenario_cols <- setdiff(effective_scenario_cols, c("GROUP_CODE", "Scenario"))
-  if (length(effective_scenario_cols) == 0) {
-    rx_match <- lookup_columns[grep("prescription", lookup_columns, ignore.case = TRUE)]
-    if (length(rx_match) > 0) effective_scenario_cols <- rx_match[1]
-  }
-
-  # Populate dynamic excel formulas so Scenario updates with user selections.
-  if (!is.na(group_col_idx)) {
-    group_col_letter <- openxlsx::int2col(group_col_idx)
-    row_count <- nrow(df_export)
-    if (row_count > 0) {
-      row_indices <- 2:(row_count + 1)
-
-      formulas <- vapply(row_indices, function(row_i) {
-        if (length(effective_scenario_cols) == 0) {
-          return(sprintf("=IF(TRIM(%s%d)=\"\", \"\", %s%d&\"_NG\")",
-                         group_col_letter, row_i, group_col_letter, row_i))
-        }
-
-        pieces <- vapply(effective_scenario_cols, function(col_name) {
-          col_letter <- openxlsx::int2col(match(col_name, lookup_columns))
-          sprintf("IF(TRIM(%s%d)=\"\",\"\",\"_\"&%s%d)", col_letter, row_i, col_letter, row_i)
-        }, character(1))
-
-        joined_parts <- paste(pieces, collapse = "&")
-        sprintf("=IF(TRIM(%s%d)=\"\", \"\", IF((%s)=\"\", %s%d&\"_NG\", %s%d&(%s)))",
-                group_col_letter, row_i, joined_parts, group_col_letter, row_i, group_col_letter, row_i, joined_parts)
-      }, character(1))
-
-      writeFormula(wb, sheet = "Lookup", x = formulas, startCol = 2, startRow = 2)
-    }
-  }
-  
-  options_row <- 1
-  validation_ranges <- list()
-  all_token <- "ALL"
-  
-  # Construct list of dropdown values using the discovered KCP catalog items and apply to specific columns within the excel object
-  for (kcp_type in meta_info$types) {
-    type_rows <- meta_info$catalog[meta_info$catalog$KCP_Type == kcp_type & !is.na(meta_info$catalog$KCP_Name), ]
-    values <- c(all_token, type_rows$KCP_Name)
-    
-    writeData(wb, "Options", x = kcp_type, startCol = 1, startRow = options_row)
-    writeData(wb, "Options", x = data.frame(KCP_Name = values), startCol = 1, startRow = options_row + 1)
-    
-    validation_ranges[[kcp_type]] <- sprintf("'Options'!$A$%d:$A$%d", options_row + 2, options_row + 1 + length(values))
-    options_row <- options_row + length(values) + 3
-  }
-  
-  header_style <- createStyle(fgFill = "#1F4E78", fontColour = "#FFFFFF", textDecoration = "bold", halign = "center")
-  addStyle(wb, "Lookup", header_style, rows = 1, cols = seq_along(names(df_export)), gridExpand = TRUE)
-  
-  freezePane(wb, "Lookup", firstActiveRow = 2, firstActiveCol = 3)
-  setColWidths(wb, "Lookup", cols = 1:ncol(df_export), widths = "auto")
-  
-  for (kcp_type in meta_info$types) {
-    col_idx <- match(kcp_type, lookup_columns)
-    if (!is.na(col_idx)) {
-      dataValidation(wb, sheet = "Lookup", cols = col_idx, rows = 2:500, 
-                     type = "list", value = validation_ranges[[kcp_type]], allowBlank = TRUE)
-    }
-  }
-  
-  if (!is.na(group_col_idx)) {
-    group_start <- options_row + 1
-    writeData(wb, "Options", x = "GROUP_CODE", startCol = 1, startRow = group_start)
-    writeData(wb, "Options", x = data.frame(GROUP_CODE = meta_info$groups), startCol = 1, startRow = group_start + 1)
-    
-    dataValidation(wb, sheet = "Lookup", cols = group_col_idx, rows = 2:500, 
-                   type = "list", value = sprintf("'Options'!$A$%d:$A$%d", group_start + 2, group_start + 1 + length(meta_info$groups)), allowBlank = FALSE)
-  }
-  
-  if (!is.null(meta_info$catalog)) {
-    writeDataTable(wb, sheet = "Options", x = meta_info$catalog[, c("KCP_Type", "Folder", "KCP_Name", "KCP_Path")], startCol = 4, startRow = 1, tableName = "KCP_Options_Detail", tableStyle = "TableStyleMedium9")
-  }
-  
-  sheetVisibility(wb)[which(names(wb) == "Options")] <- "hidden"
-  return(wb)
-}
-
-# ------------------------------------------------------------------------------
-# 2. USER INTERFACE ARCHITECTURE
-# ------------------------------------------------------------------------------
-sys_cores <- parallel::detectCores()
-if (is.na(sys_cores)) sys_cores <- 1
-def_cores <- max(1, floor(sys_cores / 4))
-
-ui <- page_fillable(
-  theme = bs_theme(version = 5, bootswatch = "flatly"),
-  padding = 0,
-  
-  tags$head(
-    tags$style(HTML("
-      .shiny-progress-notification {
-        position: fixed !important;
-        top: 50% !important;
-        left: 50% !important;
-        transform: translate(-50%, -50%) !important;
-        right: auto !important;
-        bottom: auto !important;
-        width: 480px !important;
-        box-shadow: 0px 4px 25px rgba(0,0,0,0.25) !important;
-        border-radius: 10px !important;
-        padding: 6px !important;
-        background-color: #ffffff !important;
-      }
-      .shiny-progress-notification .progress {
-        margin: 14px 12px 6px 12px !important;
-        height: 14px !important;
-        border-radius: 6px !important;
-      }
-      .shiny-progress-notification .progress-text {
-        padding: 4px 12px 10px 12px !important;
-      }
-      
-      /* Custom Title Bar spanning entire top */
-      .custom-top-bar {
-        background-color: #2C3E50; /* Flatly dark blue/slate */
-        color: #ffffff;
-        padding: 12px 20px;
-        font-size: 22px;
-        width: 100%;
-      }
-      
-      /* Custom styling for the right-side tabs to match exactly like a navbar */
-      .main-panel-tabs > .nav {
-        background-color: #2C3E50;
-        padding: 0 10px;
-        margin-bottom: 15px;
-        border-radius: 4px;
-      }
-      .main-panel-tabs > .nav .nav-link {
-        color: rgba(255,255,255,0.7);
-        border: none !important;
-        border-radius: 0;
-        padding: 12px 20px !important;
-        font-size: 16px;
-      }
-      .main-panel-tabs > .nav .nav-link:hover {
-        color: rgba(255,255,255,0.9);
-      }
-      .main-panel-tabs > .nav .nav-link.active {
-        color: #ffffff !important;
-        border-bottom: 3px solid #18BC9C !important; /* Flatly teal accent */
-        background: transparent !important;
-      }
-    ")),
-    tags$script(HTML("
-      Shiny.addCustomMessageHandler('update_progress', function(message) {
-        let pbar = document.getElementById('pipeline_progress_bar');
-        if (pbar) {
-          pbar.style.width = message.pct + '%';
-          pbar.innerHTML = message.pct + '%';
-        }
-        let ptext = document.getElementById('pipeline_progress_text');
-        if (ptext) {
-          ptext.innerHTML = message.detail;
-        }
-      });
-    "))
-  ),
-  
-  div(class = "custom-top-bar", "FVS Batch Processor"),
-  
-  shinyjs::useShinyjs(),
-  
-  layout_sidebar(
-    class = "p-3", 
-    border = FALSE,
-    sidebar = sidebar(
-      width = 380,
-      conditionalPanel(
-        condition = "input.main_tabs == 'about_tab'",
-        h5("Welcome"),
-        p("Navigate through the tabs on the right to configure and execute your FVS batch processing pipeline.")
-      ),
-      conditionalPanel(
-        condition = "input.main_tabs == 'tab1'",
-        h5("Execution Settings"),
-        
-        tags$label("Root Folder Path", class = "form-label", `for` = "root_dir"),
-        div(class = "input-group mb-3",
-            shinyFiles::shinyDirButton(
-              id = "browse_root",
-              label = "Browse...",
-              title = "Select Root Folder Path",
-              buttonType = "default",
-              class = "action-button"
-            ),
-            tags$input(
-              id = "root_dir",
-              type = "text",
-              class = "form-control",
-              value = RootDir,
-              placeholder = "Select root folder path"
-            )
-        ),
-        
-        tags$label("Master Database File", class = "form-label", `for` = "master_db_upload"),
-        fileInput("master_db_upload", NULL, accept = c(".db", ".sqlite"), buttonLabel = "Browse...", placeholder = DefaultDB, width = "100%"),
-        div(style = "display:none;", textInput("master_db", label = NULL, value = DefaultDB)),
-        
-        tags$label("KCP Directory Name", class = "form-label", `for` = "kcp_dir"),
-        div(class = "input-group mb-3",
-            shinyFiles::shinyDirButton(
-              id = "browse_kcp",
-              label = "Browse...",
-              title = "Select KCP Directory",
-              buttonType = "default",
-              class = "action-button"
-            ),
-            tags$input(
-              id = "kcp_dir",
-              type = "text",
-              class = "form-control",
-              value = DefaultKCP,
-              placeholder = "Select KCP directory"
-            )
-        ),
-        hr(),
-        textInput("stand_tbl", "Stand Initialization Table", value = "FVS_STANDINIT"),
-        textInput("group_col", "Database Grouping Column", value = "VARIANT"),
-        textInput("exclude_grps", "Excluded Groups (Comma-separated)", value = ""),
-        hr(),
-        actionButton("load_metadata", "Scan Directories & Connect DB", class = "btn-primary w-100")
-      ),
-      conditionalPanel(
-        condition = "input.main_tabs == 'tab2'",
-        h5("KCP Lookup Table"),
-        p("Create specific KCP combinations that will define your FVS runs. You can do this by editing the grid directly or export the excel file for further editing and reupload to define your Group/Prescription combinations."),
-        selectInput("scenario_add_cols", "Scenario Columns (In Addition To GROUP_CODE)", choices = NULL, multiple = TRUE),
-        downloadButton("download_excel", "Export Matrix to Excel", class = "btn-outline-primary w-100 mb-2"),
-        fileInput("upload_excel", "Import Excel Matrix File", accept = c(".xlsx", ".xls", ".csv"), buttonLabel = "Browse..."),
-        hr(),
-        actionButton("save_matrix", "Save KCP Scenarios & Build Manifest", class = "btn-primary w-100")
-      ),
-      conditionalPanel(
-        condition = "input.main_tabs == 'tab3'",
-        h5("Keyfile Parameters"),
-        numericInput("num_cores", paste0("Compute Cores (Parallel Generation - ", sys_cores, " Available)"), value = def_cores, min = 1, step = 1),
-        numericInput("num_cycles", "Simulation Cycles Count", value = 10, min = 1, step = 1),
-        numericInput("time_int", "Cycle Time Interval (Years)", value = 10, min = 1, step = 1),
-        numericInput("inv_year", "Inventory Baseline Start Year", value = 2024, min = 1900, step = 1),
-        hr(),
-        actionButton("gen_keyfiles", "Generate Stand Keyfiles", icon = icon("cogs"), class = "btn-primary w-100 mb-2"),
-        shinyjs::hidden(actionButton("kill_gen_btn", "Cancel", icon = icon("xmark"), class = "btn-danger w-100"))
-      ),
-      conditionalPanel(
-        condition = "input.main_tabs == 'tab4'",
-        h5("Simulation Parameters"),
-        numericInput("num_cores_rfvs", paste0("Compute Cores (Parallel Execution - ", sys_cores, " Available)"), value = def_cores, min = 1, step = 1),
-        hr(),
-        h5("FVS Install Location"),
-        textInput("bin_loc", "FVS Bin Path (Executable Location)", value = "C:/FVS/FVSSoftware/FVSbin"),
-        hr(),
-        h5("Execution Workflow"),
-        selectInput("overwrite_scens", "Force Overwrite Specific Scenarios:", choices = NULL, multiple = TRUE),
-        actionButton("run_rfvs", "Execute Parallel rFVS Engine", icon = icon("play"), class = "btn-primary w-100 mb-2"),
-        shinyjs::hidden(actionButton("kill_run_btn", "Cancel", icon = icon("xmark"), class = "btn-danger w-100"))
-      ),
-      conditionalPanel(
-        condition = "input.main_tabs == 'tab5'",
-        h5("Consolidate Outputs"),
-        numericInput("num_cores_merge", paste0("Compute Cores (Parallel Consolidation - ", sys_cores, " Available)"), value = def_cores, min = 1, step = 1),
-        hr(),
-        p("Merge individual stand databases into Group/Scenario databases, and then combine them all into a single master database."),
-        actionButton("merge_outputs", "Consolidate Master Outputs", icon = icon("database"), class = "btn-primary w-100 mb-2"),
-        shinyjs::hidden(actionButton("kill_merge_btn", "Cancel", icon = icon("xmark"), class = "btn-danger w-100"))
-      )
-    ),
-    
-    div(class = "main-panel-tabs h-100",
-        navset_tab(
-          id = "main_tabs",
-          nav_panel(
-            title = "About",
-            value = "about_tab",
-            icon = icon("circle-info"),
-            card(
-              card_header("Pipeline Overview"),
-              p("This application streamlines the process of linking a FVS-ready SQLite database with keyword components (KCPs) and executing them in parallel through the Forest Vegetation Simulator (rFVS)."),
-              h5("Workflow Summary:"),
-              tags$ul(
-                tags$li(strong("Link Input Database:"), " Connect to your FVS-ready SQLite database."),
-                tags$li(strong("Define Scenarios:"), " Specify a grouping column to organize stands for each FVS run."),
-                tags$li(strong("Configure Runs:"), " Create a KCP lookup table to generate Group/Prescription specific scenarios using the interactive interface or by downloading, editing, and uploading the mapped Excel spreadsheet given the user's KCPs."),
-                tags$li(strong("Create Keyfiles:"), " Generate standalone FVS .key configuration files with all specified scenarios on a per-stand basis, natively staged for parallel processing."),
-                tags$li(strong("Execute & Consolidate:"), " Run rFVS instances concurrently across user-specified compute cores, merging all final database results on a Group/Prescription basis. ", strong("Note:"), " The system tracks previously completed runs. If you add new scenarios to an existing project, only the new un-simulated scenarios will be run, saving processing time. To rerun an already executed scenario, you must explicitly specify it in the 'Force Overwrite Specific Scenarios' dropdown on Tab 4.")
-              ),
-              hr(),
-              h5("KCP Folder Organization:"),
-              p("Users must organize their ", code(".kcp"), " files into categorical subfolders within their designated KCP directory (e.g., ", strong("KCP_Catalog"), "). These subfolders dictate the configuration combinations available for building scenarios."),
-              p("Importantly, the alphabetical/numerical order of these subfolders dictates the sequence in which the KCP files are appended and read by FVS. We strongly recommend using numbered prefixes (e.g., ", code("01_Global"), ", ", code("02_Calibration"), ", ", code("03_Prescriptions"), ", ", code("04_Outputs"), ") to explicitly control this load order. Ensure your output-generating KCP folder is specified last (numbered highest) so its instructions are executed after all other parameters."),
-              hr(),
-              h5("Folder Structure & Expected Locations:"),
-              p("Below is the recommended folder structure for organizing your project and running the FVS Batch Processor. The system generally expects your master database and KCP files to be located under your specified ", strong("Root Folder Path"), " as shown below e.g.,", code("FVS_BatchProcessing"), ". During execution, it builds standalone ", code("run.key"), " files per stand, executes them to dump temporary ", code(".out"), " and ", code(".db"), " files locally, and finally aggregates them into centralized merged output databases. While this structure is the default recommendation, users can specify custom distinct pathways using the overrides in Step 1."),
-              pre("FVS_BatchProcessing
-\u251C\u2500\u2500 Inputs
-\u2502   \u2514\u2500\u2500 AllBKNF_Combined.db
-\u251C\u2500\u2500 KCPs
-\u2502   \u251C\u2500\u2500 01_Global
-\u2502   \u2502   \u2514\u2500\u2500 BLK_HILLS_Global.kcp
-\u2502   \u251C\u2500\u2500 02_Calibration
-\u2502   \u2502   \u251C\u2500\u2500 Group_A_GrowthCalib.kcp
-\u2502   \u2502   \u2514\u2500\u2500 Group_B_GrowthCalib.kcp
-\u2502   \u251C\u2500\u2500 03_Prescriptions
-\u2502   \u2502   \u251C\u2500\u2500 Rx01_TC01.kcp
-\u2502   \u2502   \u251C\u2500\u2500 Rx01_TC02.kcp
-\u2502   \u2502   \u251C\u2500\u2500 Rx02_TC01.kcp
-\u2502   \u2502   \u2514\u2500\u2500 Rx02_TC02.kcp
-\u2502   \u2514\u2500\u2500 04_Outputs
-\u2502       \u2514\u2500\u2500 outputDB.kcp
-\u251C\u2500\u2500 rFVS_Runs
-\u2502   \u251C\u2500\u2500 Group_A
-\u2502   \u2502   \u2514\u2500\u2500 Group_A_Rx01_TC01
-\u2502   \u2502       \u2514\u2500\u2500 fvs_<Stand_ID>
-\u2502   \u2502           \u251C\u2500\u2500 out.db
-\u2502   \u2502           \u251C\u2500\u2500 run.key
-\u2502   \u2502           \u2514\u2500\u2500 run.out
-\u2502   \u2514\u2500\u2500 Group_B
-\u2502       \u2514\u2500\u2500 Group_B_Rx01_TC01
-\u2502           \u2514\u2500\u2500 fvs_<Stand_ID>
-\u2502               \u251C\u2500\u2500 out.db
-\u2502               \u251C\u2500\u2500 run.key
-\u2502               \u2514\u2500\u2500 run.out
-\u2514\u2500\u2500 Outputs
-    \u251C\u2500\u2500 Group_A_Rx01_TC01
-    \u2502   \u2514\u2500\u2500 FVSOut_Group_A_Rx01_TC01.db
-    \u2514\u2500\u2500 Group_B_Rx01_TC01
-        \u2514\u2500\u2500 FVSOut_Group_B_Rx01_TC01.db"),
-              hr(),
-              # h5("Workflow Diagram"),
-              tags$figure(
-                tags$img(
-                  src = paste0("workflow_assets/", WorkflowImageFile),
-                  alt = "FVS batch processing workflow diagram",
-                  style = "display: block; margin: 0 auto; width: 100%; max-width: 1800px; height: auto; border: 1px solid #d9d9d9; border-radius: 6px;"
-                ),
-                # tags$figcaption(
-                #   style = "margin-top: 8px; color: #666;",
-                #   "Figure 1. End-to-end FVS batch workflow."
-                # )
-              ),
-              hr(),
-              h5("Author"),
-              p(strong("Cody Dangerfield")),
-              p("Email: ", tags$a(href = "mailto:cody.dangerfield@usda.gov", "cody.dangerfield@usda.gov")),
-              p("If you have questions, please contact me.")
-              
-            )
-          ),
-          nav_panel(
-            title = "1. Global Parameters",
-            value = "tab1",
-            icon = icon("sliders"),
-            card(
-              card_header("System Metadata Connection Output Summary"),
-              verbatimTextOutput("meta_status")
-              
-            )
-          ),
-          nav_panel(
-            title = "2. KCP Lookup Table",
-            value = "tab2",
-            icon = icon("table"),
-            card(
-              card_header("Editable Scenario Definitions Matrix"),
-              p(em("Note: Changes made inside the grid synchronize automatically. You can right-click rows to expand/delete elements.")),
-              p(strong("Reminder: "), "The columns below are dynamically built based on your KCP subfolders. The numerical/alphabetical order of those root folders dictates how those KCPs are stacked together for the simulation. If a Prescription is not specified, ", code("GROUP_CODE + _NG"), " will be used to specify the Scenario."),
-              rHandsontableOutput("prescription_table", height = "600px")
-              
-            )
-          ),
-          nav_panel(
-            title = "3. Create Keyfiles",
-            value = "tab3",
-            icon = icon("file-code"),
-            card(
-              card_header("Pipeline Generation Status & Queue Diagnostics"),
-              p("Verifies setup context prior to generating standalone keyfile sequences:"),
-              verbatimTextOutput("pipeline_diagnostics")
-              
-            )
-          ),
-          nav_panel(
-            title = "4. Run rFVS Engine",
-            value = "tab4",
-            icon = icon("play"),
-            card(
-              card_header("Simulation Pipeline Execution Status"),
-              p("Verifies parameters relative to active database context before starting runs:"),
-              p(strong("Reminder:"), " Only scenarios that have not yet been simulated will be executed in order to save computation time. If you wish to rebuild and re-execute a previously completed scenario, use the 'Force Overwrite Specific Scenarios' dropdown on the left to mark it for deletion/rerun."),
-              verbatimTextOutput("pipeline_diagnostics_rfvs")
-            )
-          ),
-          nav_panel(
-            title = "5. Consolidate Outputs",
-            value = "tab5",
-            icon = icon("database"),
-            card(
-              card_header("Master Database Consolidation"),
-              p("This step consolidates all temporary stand-level SQLite databases generated by FVS into Scenario-specific databases, and then ultimately merges them into a single master FVS_Out_{Date}.db file in the Outputs folder."),
-              verbatimTextOutput("pipeline_diagnostics_merge")
-            )
-          )
-        )
-    )
-  )
-)
-
-# ------------------------------------------------------------------------------
-# 3. COMPONENT EXECUTION SERVER SIDE LOGIC
-# ------------------------------------------------------------------------------
 server <- function(input, output, session) {
   
   bg_gen <- reactiveVal(NULL)
@@ -713,11 +29,23 @@ server <- function(input, output, session) {
     sprintf("%02d:%02d:%02d", hh, mm, ss)
   }
   
-  # --- UI BUTTON BROWSER EVENT OBSERVERS ---
-  
+  # --- SHINY-NATIVE PICKER FLOWS ---
+
   sys_volumes <- c("Current Workspace" = getwd(), shinyFiles::getVolumes()())
   shinyFiles::shinyDirChoose(input, "browse_root", roots = sys_volumes)
-  
+  shinyFiles::shinyDirChoose(input, "browse_kcp", roots = sys_volumes)
+
+  normalize_dir_input <- function(path, fallback = getwd()) {
+    if (is.null(path) || length(path) == 0 || is.na(path[1])) {
+      path <- ""
+    } else {
+      path <- path[1]
+    }
+    path <- trimws(as.character(path))
+    if (!nzchar(path)) path <- fallback
+    normalizePath(path, winslash = "/", mustWork = FALSE)
+  }
+
   observeEvent(input$browse_root, {
     if (!is.integer(input$browse_root)) {
       selected_dir <- shinyFiles::parseDirPath(sys_volumes, input$browse_root)
@@ -725,8 +53,17 @@ server <- function(input, output, session) {
         updateTextInput(session, "root_dir", value = normalizePath(selected_dir[1], winslash = "/", mustWork = FALSE))
       }
     }
-  }, ignoreInit = TRUE)
-  
+  })
+
+  observeEvent(input$browse_kcp, {
+    if (!is.integer(input$browse_kcp)) {
+      selected_dir <- shinyFiles::parseDirPath(sys_volumes, input$browse_kcp)
+      if (length(selected_dir) > 0 && nzchar(selected_dir[1])) {
+        updateTextInput(session, "kcp_dir", value = normalizePath(selected_dir[1], winslash = "/", mustWork = FALSE))
+      }
+    }
+  })
+
   observeEvent(input$master_db_upload, {
     file_info <- input$master_db_upload
     req(file_info)
@@ -748,47 +85,112 @@ server <- function(input, output, session) {
     showNotification(sprintf("Master database staged to %s", db_dest), type = "message")
   }, ignoreInit = TRUE)
   
-  observeEvent(input$root_dir, {
-    runtime_root <- normalizePath(input$root_dir, winslash = "/", mustWork = FALSE)
-    inputs_dir <- normalizePath(file.path(runtime_root, "Inputs"), winslash = "/", mustWork = FALSE)
-    if (dir.exists(inputs_dir)) {
-      available_dbs <- list.files(inputs_dir, pattern = "\\.(db|sqlite)$", ignore.case = TRUE, full.names = FALSE)
-      if (length(available_dbs) > 0) {
-        new_db <- available_dbs[1]
-        updateTextInput(session, "master_db", value = new_db)
-        shinyjs::runjs(sprintf("$('#master_db_upload').closest('.input-group').find('input[type=\"text\"]').val('%s');", new_db))
-      }
-    }
-  }, ignoreInit = TRUE)
-  
-  shinyFiles::shinyDirChoose(input, "browse_kcp", roots = sys_volumes)
-  
-  observeEvent(input$browse_kcp, {
-    if (!is.integer(input$browse_kcp)) {
-      selected_dir <- shinyFiles::parseDirPath(sys_volumes, input$browse_kcp)
-      if (length(selected_dir) > 0 && nzchar(selected_dir[1])) {
-        updateTextInput(session, "kcp_dir", value = normalizePath(selected_dir[1], winslash = "/", mustWork = FALSE))
-      }
-    }
-  })
-  
+  find_input_dir <- function(root_dir) {
+    top_dirs <- tryCatch(list.dirs(root_dir, full.names = TRUE, recursive = FALSE), error = function(e) character(0))
+    if (length(top_dirs) == 0) return("")
+    top_dirs <- unique(normalizePath(top_dirs, winslash = "/", mustWork = FALSE))
+
+    candidate_input_dirs <- top_dirs[grepl("input", basename(top_dirs), ignore.case = TRUE)]
+    exact_input <- candidate_input_dirs[tolower(basename(candidate_input_dirs)) %in% c("input", "inputs")]
+    if (length(exact_input) > 0) candidate_input_dirs <- exact_input
+
+    if (length(candidate_input_dirs) == 0) return("")
+    normalizePath(candidate_input_dirs[1], winslash = "/", mustWork = FALSE)
+  }
+
+  find_kcp_dir <- function(root_dir) {
+    top_dirs <- tryCatch(list.dirs(root_dir, full.names = TRUE, recursive = FALSE), error = function(e) character(0))
+    if (length(top_dirs) == 0) return("")
+    top_dirs <- unique(normalizePath(top_dirs, winslash = "/", mustWork = FALSE))
+
+    kcp_matches <- top_dirs[grepl("kcp", basename(top_dirs), ignore.case = TRUE)]
+    exact_kcp <- kcp_matches[tolower(basename(kcp_matches)) %in% c("kcp", "kcp_catalog")]
+    if (length(exact_kcp) > 0) kcp_matches <- exact_kcp
+
+    if (length(kcp_matches) == 0) return("")
+    normalizePath(kcp_matches[1], winslash = "/", mustWork = FALSE)
+  }
+
+  detect_single_db_name <- function(root_dir) {
+    input_dir <- find_input_dir(root_dir)
+    if (!nzchar(input_dir)) return("<FVS_Input.db>")
+
+    available_dbs <- tryCatch(
+      list.files(input_dir, pattern = "\\.(db|sqlite)$", ignore.case = TRUE, full.names = FALSE),
+      error = function(e) character(0)
+    )
+    if (length(available_dbs) == 1) available_dbs[1] else "<FVS_Input.db>"
+  }
+
   resolve_db_path <- function(root_dir, db_name, slash = "/") {
     db_name <- trimws(db_name)
+
+    if (!nzchar(db_name) || grepl("^<.*>$", db_name)) {
+      db_name <- detect_single_db_name(root_dir)
+    }
+
     if (grepl("^([A-Za-z]:|\\\\|/)", db_name)) {
       normalizePath(db_name, winslash = slash, mustWork = FALSE)
     } else {
-      normalizePath(file.path(root_dir, "Inputs", db_name), winslash = slash, mustWork = FALSE)
+      input_dir <- find_input_dir(root_dir)
+      if (!nzchar(input_dir)) {
+        input_dir <- normalizePath(file.path(root_dir, "Inputs"), winslash = "/", mustWork = FALSE)
+      }
+      normalizePath(file.path(input_dir, db_name), winslash = slash, mustWork = FALSE)
     }
   }
   
   resolve_kcp_path <- function(root_dir, dir_name, slash = "/") {
     dir_name <- trimws(dir_name)
+
+    if (!nzchar(dir_name) || identical(dir_name, "KCP_Catalog")) {
+      detected_kcp <- find_kcp_dir(root_dir)
+      if (nzchar(detected_kcp)) dir_name <- detected_kcp
+    }
+
     if (grepl("^([A-Za-z]:|\\\\|/)", dir_name)) {
       normalizePath(dir_name, winslash = slash, mustWork = FALSE)
     } else {
       normalizePath(file.path(root_dir, dir_name), winslash = slash, mustWork = FALSE)
     }
   }
+
+  # Runtime defaults must be derived at launch (not package install time).
+  derive_runtime_defaults <- function(project_root) {
+    root <- normalizePath(project_root, winslash = "/", mustWork = FALSE)
+
+    top_dirs <- tryCatch(list.dirs(root, full.names = TRUE, recursive = FALSE), error = function(e) character(0))
+    top_dirs <- unique(normalizePath(top_dirs, winslash = "/", mustWork = FALSE))
+
+    db_default <- detect_single_db_name(root)
+    kcp_detected <- find_kcp_dir(root)
+    kcp_default <- if (nzchar(kcp_detected)) kcp_detected else "KCP_Catalog"
+
+    list(root = root, db = db_default, kcp = kcp_default)
+  }
+
+  defaults_initialized <- reactiveVal(FALSE)
+
+  observe({
+    if (isTRUE(defaults_initialized())) return()
+    d <- derive_runtime_defaults(getwd())
+    if (!nzchar(trimws(as.character(d$db)))) d$db <- "<FVS_Input.db>"
+    updateTextInput(session, "root_dir", value = d$root)
+    updateTextInput(session, "master_db", value = d$db)
+    updateTextInput(session, "kcp_dir", value = d$kcp)
+    defaults_initialized(TRUE)
+  })
+
+  observeEvent(input$root_dir, {
+    runtime_root <- normalize_dir_input(input$root_dir, fallback = getwd())
+    detected_db <- detect_single_db_name(runtime_root)
+    if (!nzchar(trimws(as.character(detected_db)))) detected_db <- "<FVS_Input.db>"
+    
+    if (detected_db != "<FVS_Input.db>") {
+        updateTextInput(session, "master_db", value = detected_db)
+        shinyjs::runjs(sprintf("$('#master_db_upload').closest('.input-group').find('input[type=\"text\"]').val('%s');", detected_db))
+    }
+  }, ignoreInit = TRUE)
   
   meta <- reactiveValues(groups = NULL, catalog = NULL, types = NULL)
   grid_data <- reactiveVal(data.frame())
@@ -818,7 +220,7 @@ server <- function(input, output, session) {
         })
       }, error = function(e) {})
     }
-  }, ignoreInit = FALSE)
+  }, ignoreInit = TRUE)
   
   observeEvent(input$stand_tbl, {
     req(input$master_db, input$root_dir, input$stand_tbl)
@@ -844,7 +246,7 @@ server <- function(input, output, session) {
         })
       }, error = function(e) {})
     }
-  })
+  }, ignoreInit = TRUE)
   
   manifest_path <- reactive({
     req(input$root_dir)
@@ -936,8 +338,27 @@ server <- function(input, output, session) {
   # Loads the available database context and dynamic KCP lookup combinations into a central reactive UI table
   observeEvent(input$load_metadata, {
     req(input$root_dir)
-    full_db_path <- resolve_db_path(input$root_dir, input$master_db)
-    full_kcp_dir <- resolve_kcp_path(input$root_dir, input$kcp_dir)
+
+    runtime_root <- normalizePath(trimws(input$root_dir), winslash = "/", mustWork = FALSE)
+    if (!nzchar(runtime_root)) runtime_root <- normalizePath(getwd(), winslash = "/", mustWork = FALSE)
+
+    runtime_db <- trimws(as.character(input$master_db))
+    if (!nzchar(runtime_db) || grepl("^<.*>$", runtime_db)) {
+      runtime_db <- detect_single_db_name(runtime_root)
+      updateTextInput(session, "master_db", value = runtime_db)
+    }
+
+    runtime_kcp <- trimws(as.character(input$kcp_dir))
+    if (!nzchar(runtime_kcp) || identical(runtime_kcp, "KCP_Catalog")) {
+      detected_kcp <- find_kcp_dir(runtime_root)
+      if (nzchar(detected_kcp)) {
+        runtime_kcp <- detected_kcp
+        updateTextInput(session, "kcp_dir", value = runtime_kcp)
+      }
+    }
+
+    full_db_path <- resolve_db_path(runtime_root, runtime_db)
+    full_kcp_dir <- resolve_kcp_path(runtime_root, runtime_kcp)
     
     if (!file.exists(full_db_path)) {
       showNotification("Database target not found at specified Root directory path.", type = "error")
@@ -1934,7 +1355,3 @@ server <- function(input, output, session) {
   })
 }
 
-# ------------------------------------------------------------------------------
-# 4. APPLICATION INITIALIZATION
-# ------------------------------------------------------------------------------
-shinyApp(ui, server)

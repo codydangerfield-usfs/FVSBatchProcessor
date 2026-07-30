@@ -3,7 +3,7 @@
 #' @param launch.browser Logical; passed to shiny::runApp.
 #' @param ... Additional arguments passed to shiny::runApp.
 #' @export
-run_app <- function(launch.browser = getOption("shiny.launch.browser", interactive()), ...) {
+run_app <- function(launch.browser = TRUE, ...) {
   if (!requireNamespace("rFVS", quietly = TRUE)) {
     stop(
       "Package 'rFVS' is required. Install it with:\n",
@@ -12,9 +12,8 @@ run_app <- function(launch.browser = getOption("shiny.launch.browser", interacti
     )
   }
 
-  app_dir <- system.file("app", package = "FVSBatchProcessor")
-  if (app_dir == "") {
-    stop("Could not find app directory. Try re-installing `FVSBatchProcessor`.", call. = FALSE)
+  if (exists("register_workflow_assets", mode = "function")) {
+    register_workflow_assets()
   }
 
   # Forward the user's current working directory into the Shiny app options
@@ -25,7 +24,7 @@ run_app <- function(launch.browser = getOption("shiny.launch.browser", interacti
   on.exit(options(opt), add = TRUE)
 
   shiny::runApp(
-    app_dir,
+    shiny::shinyApp(ui = ui, server = server),
     launch.browser = launch.browser,
     ...
   )
