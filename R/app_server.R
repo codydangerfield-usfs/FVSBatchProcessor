@@ -188,9 +188,12 @@ server <- function(input, output, session) {
     
     # Inject initial DB string into fileInput UI via frontend DOM manipulation
     if (d$db != "<FVS_Input.db>") {
-      shinyjs::runjs(sprintf("setTimeout(function() { $('#master_db_upload').closest('.input-group').find('input[type=\"text\"]').val('%s'); }, 500);", d$db))
+        js_code <- sprintf(
+          "(function check() { var el = document.getElementById('master_db_upload'); if (el) { var txt = el.closest('.input-group').querySelector('input[type=\"text\"]'); if (txt) { txt.value = '%s'; txt.placeholder = '%s'; } } else { setTimeout(check, 100); } })();",
+          d$db, d$db
+        )
+        shinyjs::runjs(js_code)
     }
-    
     defaults_initialized(TRUE)
   })
 
@@ -201,7 +204,11 @@ server <- function(input, output, session) {
     
     if (detected_db != "<FVS_Input.db>") {
         updateTextInput(session, "master_db", value = detected_db)
-        shinyjs::runjs(sprintf("$('#master_db_upload').closest('.input-group').find('input[type=\"text\"]').val('%s');", detected_db))
+        js_code <- sprintf(
+          "(function check() { var el = document.getElementById('master_db_upload'); if (el) { var txt = el.closest('.input-group').querySelector('input[type=\"text\"]'); if (txt) { txt.value = '%s'; txt.placeholder = '%s'; } } else { setTimeout(check, 100); } })();",
+          detected_db, detected_db
+        )
+        shinyjs::runjs(js_code)
     }
   }, ignoreInit = TRUE)
   
