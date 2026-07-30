@@ -330,7 +330,7 @@ choose_directory_universal <- function(caption = "Select a directory") {
     ps_code <- sprintf('
       Add-Type -AssemblyName System.Windows.Forms
       $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-      $dialog.Description = "%%s"
+      $dialog.Description = "%s"
       $dialog.ShowNewFolderButton = $true
       $topMost = New-Object System.Windows.Forms.Form
       $topMost.TopMost = $true
@@ -354,7 +354,7 @@ choose_directory_universal <- function(caption = "Select a directory") {
     script <- sprintf('
       try
         tell application (path to frontmost application as text)
-          set myFolder to choose folder with prompt "%%s"
+          set myFolder to choose folder with prompt "%s"
         end tell
         POSIX path of myFolder
       end try
@@ -371,7 +371,7 @@ choose_directory_universal <- function(caption = "Select a directory") {
     if (nzchar(Sys.which("zenity"))) {
       res <- tryCatch(
         system2("zenity", 
-                args = c("--file-selection", "--directory", sprintf(\'--title="%%s"\', caption)), 
+                args = c("--file-selection", "--directory", sprintf('--title="%%s"', caption)), 
                 stdout = TRUE, stderr = FALSE),
         error = function(e) NULL
       )
