@@ -61,8 +61,9 @@ server <- function(input, output, session) {
   # Keep the visible fileInput label in sync whenever the hidden DB field changes,
   # including initial auto-detection during app startup.
   observeEvent(input$master_db, {
+    db_label <- trimws(as.character(input$master_db))
     session$onFlushed(function() {
-      sync_master_db_upload_label(input$master_db)
+      sync_master_db_upload_label(db_label)
     }, once = TRUE)
   }, ignoreInit = FALSE)
 
