@@ -29,14 +29,10 @@ server <- function(input, output, session) {
     sprintf("%02d:%02d:%02d", hh, mm, ss)
   }
   
-  # --- SHINY-NATIVE PICKER FLOWS ---
+  # --- UI BUTTON BROWSER EVENT OBSERVERS ---
 
-  # Use the user's active session wd instead of the package directory
+  # Use the user's active session wd instead of the package directory.
   dynamic_wd <- getShinyOption("FVS_USER_WD", default = getwd())
-  sys_volumes <- c("Current Workspace" = dynamic_wd, shinyFiles::getVolumes()())
-  
-  shinyFiles::shinyDirChoose(input, "browse_root", roots = sys_volumes)
-  shinyFiles::shinyDirChoose(input, "browse_kcp", roots = sys_volumes)
 
   normalize_dir_input <- function(path, fallback = dynamic_wd) {
     if (is.null(path) || length(path) == 0 || is.na(path[1])) {
@@ -49,23 +45,36 @@ server <- function(input, output, session) {
     normalizePath(path, winslash = "/", mustWork = FALSE)
   }
 
+  sync_master_db_upload_label <- function(db_label) {
+    safe_db <- trimws(as.character(db_label))
+    if (!nzchar(safe_db)) safe_db <- "<FVS_Input.db>"
+    safe_db <- gsub("\\\\", "\\\\\\\\", safe_db)
+    safe_db <- gsub("'", "\\\\'", safe_db)
+
+    js_code <- sprintf(
+      "(function check() { var el = document.getElementById('master_db_upload'); if (!el) { setTimeout(check, 100); return; } var grp = el.closest('.input-group') || el.parentElement; var txt = grp ? grp.querySelector('input[type=\\\"text\\\"], input.form-control') : null; if (txt) { txt.value = '%s'; txt.placeholder = '%s'; } if (window.jQuery) { var jq = window.jQuery('#master_db_upload').closest('.input-group').find('input[type=\\\"text\\\"]'); if (jq.length) { jq.val('%s'); jq.attr('placeholder', '%s'); } } })();",
+      safe_db, safe_db, safe_db, safe_db
+    )
+    shinyjs::runjs(js_code)
+  }
+
   observeEvent(input$browse_root, {
-    if (!is.integer(input$browse_root)) {
-      selected_dir <- shinyFiles::parseDirPath(sys_volumes, input$browse_root)
-      if (length(selected_dir) > 0 && nzchar(selected_dir[1])) {
-        updateTextInput(session, "root_dir", value = normalizePath(selected_dir[1], winslash = "/", mustWork = FALSE))
-      }
+    req(input$browse_root > 0)
+    default_root <- normalize_dir_input(input$root_dir, fallback = dynamic_wd)
+    selected_dir <- get_native_folder(default_path = default_root, caption_text = "Select Root Folder Path")
+    if (!is.null(selected_dir)) {
+      updateTextInput(session, "root_dir", value = normalizePath(selected_dir, winslash = "/", mustWork = FALSE))
     }
-  })
+  }, ignoreInit = TRUE)
 
   observeEvent(input$browse_kcp, {
-    if (!is.integer(input$browse_kcp)) {
-      selected_dir <- shinyFiles::parseDirPath(sys_volumes, input$browse_kcp)
-      if (length(selected_dir) > 0 && nzchar(selected_dir[1])) {
-        updateTextInput(session, "kcp_dir", value = normalizePath(selected_dir[1], winslash = "/", mustWork = FALSE))
-      }
+    req(input$browse_kcp > 0)
+    default_path <- file.path(normalize_dir_input(input$root_dir, fallback = dynamic_wd), "KCP_Catalog")
+    selected_dir <- get_native_folder(default_path = default_path, caption_text = "Select KCP Directory")
+    if (!is.null(selected_dir)) {
+      updateTextInput(session, "kcp_dir", value = normalizePath(selected_dir, winslash = "/", mustWork = FALSE))
     }
-  })
+  }, ignoreInit = TRUE)
 
   observeEvent(input$master_db_upload, {
     file_info <- input$master_db_upload
@@ -85,6 +94,7 @@ server <- function(input, output, session) {
     }
 
     updateTextInput(session, "master_db", value = db_name)
+    sync_master_db_upload_label(db_name)
     showNotification(sprintf("Master database staged to %s", db_dest), type = "message")
   }, ignoreInit = TRUE)
   
@@ -185,15 +195,9 @@ server <- function(input, output, session) {
     updateTextInput(session, "root_dir", value = d$root)
     updateTextInput(session, "master_db", value = d$db)
     updateTextInput(session, "kcp_dir", value = d$kcp)
-    
-    # Inject initial DB string into fileInput UI via frontend DOM manipulation
-    if (d$db != "<FVS_Input.db>") {
-        js_code <- sprintf(
-          "(function check() { var el = document.getElementById('master_db_upload'); if (el) { var txt = el.closest('.input-group').querySelector('input[type=\"text\"]'); if (txt) { txt.value = '%s'; txt.placeholder = '%s'; } } else { setTimeout(check, 100); } })();",
-          d$db, d$db
-        )
-        shinyjs::runjs(js_code)
-    }
+
+    # Keep visible file input text synchronized with the detected DB.
+    sync_master_db_upload_label(d$db)
     defaults_initialized(TRUE)
   })
 
@@ -201,15 +205,9 @@ server <- function(input, output, session) {
     runtime_root <- normalize_dir_input(input$root_dir, fallback = getShinyOption("FVS_USER_WD", default = getwd()))
     detected_db <- detect_single_db_name(runtime_root)
     if (!nzchar(trimws(as.character(detected_db)))) detected_db <- "<FVS_Input.db>"
-    
-    if (detected_db != "<FVS_Input.db>") {
-        updateTextInput(session, "master_db", value = detected_db)
-        js_code <- sprintf(
-          "(function check() { var el = document.getElementById('master_db_upload'); if (el) { var txt = el.closest('.input-group').querySelector('input[type=\"text\"]'); if (txt) { txt.value = '%s'; txt.placeholder = '%s'; } } else { setTimeout(check, 100); } })();",
-          detected_db, detected_db
-        )
-        shinyjs::runjs(js_code)
-    }
+
+    updateTextInput(session, "master_db", value = detected_db)
+    sync_master_db_upload_label(detected_db)
   }, ignoreInit = TRUE)
   
   meta <- reactiveValues(groups = NULL, catalog = NULL, types = NULL)

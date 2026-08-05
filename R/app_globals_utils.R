@@ -4,6 +4,158 @@
 # 1. GLOBAL SETTINGS & UTILITIES
 # ------------------------------------------------------------------------------
 
+# Robust native OS folder picker wrapper.
+get_native_folder <- function(default_path = "~", caption_text = "Select a Directory") {
+  os <- Sys.info()[["sysname"]]
+  path <- NULL
+
+  # Expand home shortcut so each backend receives a concrete path.
+  default_path <- path.expand(default_path)
+
+  if (os == "Windows") {
+    win_path <- gsub("/", "\\\\", default_path)
+
+    ps_script <- paste0(
+      '$code = @"\n',
+      'using System;\n',
+      'using System.Runtime.InteropServices;\n',
+      'public class NativeFolderPicker {\n',
+      '    [DllImport("user32.dll")]\n',
+      '    private static extern IntPtr GetForegroundWindow();\n',
+      '    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]\n',
+      '    private static extern void SHCreateItemFromParsingName(\n',
+      '        [MarshalAs(UnmanagedType.LPWStr)] string pszPath,\n',
+      '        IntPtr pbc,\n',
+      '        ref Guid riid,\n',
+      '        [MarshalAs(UnmanagedType.Interface)] out IShellItem ppv);\n',
+      '    [ComImport, Guid("42f85136-db7e-439c-85f1-e4075d135fc8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]\n',
+      '    private interface IFileOpenDialog {\n',
+      '        [PreserveSig] int Show(IntPtr parent);\n',
+      '        void SetFileTypes(uint cFileTypes, IntPtr rgFilterSpec);\n',
+      '        void SetFileTypeIndex(uint iFileType);\n',
+      '        void GetFileTypeIndex(out uint piFileType);\n',
+      '        void Advise(IntPtr pfde, out uint pdwCookie);\n',
+      '        void Unadvise(uint dwCookie);\n',
+      '        void SetOptions(uint dwFlags);\n',
+      '        void GetOptions(out uint pdwFlags);\n',
+      '        void SetDefaultFolder(IShellItem psi);\n',
+      '        void SetFolder(IShellItem psi);\n',
+      '        void GetFolder(out IShellItem ppsi);\n',
+      '        void GetCurrentSelection(out IShellItem ppsi);\n',
+      '        void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string pszName);\n',
+      '        void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string pszName);\n',
+      '        void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string pszTitle);\n',
+      '        void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string pszText);\n',
+      '        void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string pszLabel);\n',
+      '        void GetResult(out IShellItem ppsi);\n',
+      '        void AddPlace(IShellItem psi, int fdap);\n',
+      '        void SetDefaultExtension([MarshalAs(UnmanagedType.LPWStr)] string pszDefaultExtension);\n',
+      '        void Close(int hr);\n',
+      '        void SetClientGuid(ref Guid guid);\n',
+      '        void ClearClientData();\n',
+      '        void SetFilter(IntPtr pFilter);\n',
+      '        void GetResults(out IntPtr ppenum);\n',
+      '        void GetSelectedItems(out IntPtr ppsai);\n',
+      '    }\n',
+      '    [ComImport, Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]\n',
+      '    private interface IShellItem {\n',
+      '        void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);\n',
+      '        void GetParent(out IShellItem ppsi);\n',
+      '        void GetDisplayName(uint sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);\n',
+      '        void GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);\n',
+      '        void Compare(IShellItem psi, uint hint, out int piOrder);\n',
+      '    }\n',
+      '    public static string Show(string initialPath, string title) {\n',
+      '        try {\n',
+      '            var dialog = (IFileOpenDialog)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7")));\n',
+      '            uint options;\n',
+      '            dialog.GetOptions(out options);\n',
+      '            dialog.SetOptions(options | 0x00000020);\n',
+      '            if (!string.IsNullOrEmpty(title)) dialog.SetTitle(title);\n',
+      '            if (!string.IsNullOrEmpty(initialPath) && System.IO.Directory.Exists(initialPath)) {\n',
+      '                try {\n',
+      '                    Guid riid = new Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe");\n',
+      '                    IShellItem item;\n',
+      '                    SHCreateItemFromParsingName(initialPath, IntPtr.Zero, ref riid, out item);\n',
+      '                    if (item != null) dialog.SetFolder(item);\n',
+      '                } catch {}\n',
+      '            }\n',
+      '            IntPtr owner = GetForegroundWindow();\n',
+      '            if (dialog.Show(owner) == 0) {\n',
+      '                IShellItem item;\n',
+      '                dialog.GetResult(out item);\n',
+      '                string chosen;\n',
+      '                item.GetDisplayName(0x80058000, out chosen);\n',
+      '                return chosen;\n',
+      '            }\n',
+      '        } catch {}\n',
+      '        return null;\n',
+      '    }\n',
+      '}\n',
+      '"@\n',
+      'Add-Type -TypeDefinition $code\n',
+      '$res = [NativeFolderPicker]::Show("', gsub('"', '`"', win_path), '", "', gsub('"', '`"', caption_text), '")\n',
+      'if ($res) { Write-Output $res }\n'
+    )
+
+    tf <- tempfile(fileext = ".ps1")
+    writeLines(ps_script, tf)
+
+    res <- tryCatch(
+      system2(
+        "powershell",
+        args = c("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", shQuote(tf)),
+        stdout = TRUE,
+        stderr = FALSE
+      ),
+      error = function(e) NULL
+    )
+
+    unlink(tf)
+    if (length(res) > 0 && nzchar(res[1])) path <- res[1]
+  } else if (os == "Darwin") {
+    script <- sprintf(
+      '\n      try\n        tell application (path to frontmost application as text)\n          activate\n          set myFolder to choose folder with prompt "%s" default location POSIX file "%s"\n        end tell\n        POSIX path of myFolder\n      end try\n    ',
+      caption_text,
+      default_path
+    )
+
+    res <- tryCatch(
+      system2("osascript", args = c("-e", shQuote(script)), stdout = TRUE, stderr = FALSE),
+      error = function(e) NULL
+    )
+    if (length(res) > 0 && !grepl("user canceled", res[1], ignore.case = TRUE)) path <- res[1]
+  } else {
+    if (nzchar(Sys.which("zenity"))) {
+      res <- tryCatch(
+        system2(
+          "zenity",
+          args = c(
+            "--file-selection", "--directory", "--modal",
+            sprintf('--title="%s"', caption_text),
+            sprintf('--filename="%s/"', default_path)
+          ),
+          stdout = TRUE,
+          stderr = FALSE
+        ),
+        error = function(e) NULL
+      )
+      if (length(res) > 0 && nzchar(res[1])) path <- res[1]
+    } else if (requireNamespace("tcltk", quietly = TRUE)) {
+      path <- tryCatch(
+        tcltk::tk_chooseDir(default = default_path, caption = caption_text),
+        error = function(e) NULL
+      )
+    }
+  }
+
+  if (is.null(path) || length(path) == 0 || identical(path, "") || is.na(path)) {
+    return(NULL)
+  }
+
+  normalizePath(as.character(path), winslash = "/", mustWork = FALSE)
+}
+
 # Set a visual icon/workflow diagram image name
 WorkflowImageFile <- "FVS_BatchProcessing_WorkflowDiagram_v3.png"
 WorkflowResourcePrefix <- "fvsbp_workflow_assets"
