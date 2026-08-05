@@ -48,14 +48,7 @@ server <- function(input, output, session) {
   sync_master_db_upload_label <- function(db_label) {
     safe_db <- trimws(as.character(db_label))
     if (!nzchar(safe_db)) safe_db <- "<FVS_Input.db>"
-    safe_db <- gsub("\\\\", "\\\\\\\\", safe_db)
-    safe_db <- gsub("'", "\\\\'", safe_db)
-
-    js_code <- sprintf(
-      "(function check(retries) { var root = document.getElementById('master_db_upload'); if (!root) { if (retries > 0) setTimeout(function(){ check(retries - 1); }, 100); return; } var fileEl = null; if (root.tagName && root.tagName.toLowerCase() === 'input' && root.type === 'file') { fileEl = root; } else { fileEl = root.querySelector ? root.querySelector('input[type=\\\"file\\\"]') : null; } if (!fileEl && retries > 0) { setTimeout(function(){ check(retries - 1); }, 100); return; } var scope = (fileEl && fileEl.closest('.shiny-input-container')) || root.closest('.shiny-input-container') || root.parentElement; var txt = scope ? scope.querySelector('input.form-control[type=\\\"text\\\"][readonly], input[type=\\\"text\\\"][readonly]') : null; if (!txt && retries > 0) { setTimeout(function(){ check(retries - 1); }, 100); return; } if (txt) { txt.value = '%s'; txt.placeholder = '%s'; txt.dispatchEvent(new Event('input', { bubbles: true })); txt.dispatchEvent(new Event('change', { bubbles: true })); } if (window.jQuery) { var jqScope = window.jQuery(fileEl || root).closest('.shiny-input-container'); var jq = jqScope.find('input.form-control[type=\\\"text\\\"][readonly], input[type=\\\"text\\\"][readonly]').first(); if (jq.length) { jq.val('%s'); jq.attr('placeholder', '%s'); jq.trigger('input'); jq.trigger('change'); } } })(40);",
-      safe_db, safe_db, safe_db, safe_db
-    )
-    shinyjs::runjs(js_code)
+    session$sendCustomMessage("set_master_db_label", list(value = safe_db))
   }
 
   # Keep the visible fileInput label in sync whenever the hidden DB field changes,

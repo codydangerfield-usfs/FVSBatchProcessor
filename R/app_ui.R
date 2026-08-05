@@ -1,4 +1,4 @@
-﻿# Auto-generated from rFVS_BatchProcessor_rShiny_v2.R
+# Auto-generated from rFVS_BatchProcessor_rShiny_v2.R
 # Split for package structure on 2026-07-29 11:06:54
 
 ui <- page_fillable(
@@ -72,6 +72,46 @@ ui <- page_fillable(
         if (ptext) {
           ptext.innerHTML = message.detail;
         }
+      });
+
+      Shiny.addCustomMessageHandler('set_master_db_label', function(message) {
+        const dbValue = (message && message.value) ? String(message.value) : '<FVS_Input.db>';
+
+        function applyLabel() {
+          const root = document.getElementById('master_db_upload');
+          if (!root) return false;
+
+          const scope = root.closest('.shiny-input-container') || root.parentElement || document;
+          let txt = scope.querySelector('input.form-control[type=\"text\"][readonly], input[type=\"text\"][readonly]');
+
+          if (!txt && root.querySelector) {
+            txt = root.querySelector('input.form-control[type=\"text\"][readonly], input[type=\"text\"][readonly]');
+          }
+
+          if (!txt) return false;
+
+          txt.value = dbValue;
+          txt.placeholder = dbValue;
+          txt.dispatchEvent(new Event('input', { bubbles: true }));
+          txt.dispatchEvent(new Event('change', { bubbles: true }));
+
+          if (window.jQuery) {
+            const jq = window.jQuery(txt);
+            jq.val(dbValue);
+            jq.attr('placeholder', dbValue);
+            jq.trigger('input');
+            jq.trigger('change');
+          }
+
+          return true;
+        }
+
+        let attempts = 0;
+        (function retry() {
+          if (applyLabel()) return;
+          attempts += 1;
+          if (attempts < 50) setTimeout(retry, 100);
+        })();
       });
     "))
   ),
