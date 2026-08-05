@@ -52,11 +52,19 @@ server <- function(input, output, session) {
     safe_db <- gsub("'", "\\\\'", safe_db)
 
     js_code <- sprintf(
-      "(function check() { var el = document.getElementById('master_db_upload'); if (!el) { setTimeout(check, 100); return; } var grp = el.closest('.input-group') || el.parentElement; var txt = grp ? grp.querySelector('input[type=\\\"text\\\"], input.form-control') : null; if (txt) { txt.value = '%s'; txt.placeholder = '%s'; } if (window.jQuery) { var jq = window.jQuery('#master_db_upload').closest('.input-group').find('input[type=\\\"text\\\"]'); if (jq.length) { jq.val('%s'); jq.attr('placeholder', '%s'); } } })();",
+      "(function check(retries) { var root = document.getElementById('master_db_upload'); if (!root) { if (retries > 0) setTimeout(function(){ check(retries - 1); }, 100); return; } var fileEl = null; if (root.tagName && root.tagName.toLowerCase() === 'input' && root.type === 'file') { fileEl = root; } else { fileEl = root.querySelector ? root.querySelector('input[type=\\\"file\\\"]') : null; } if (!fileEl && retries > 0) { setTimeout(function(){ check(retries - 1); }, 100); return; } var scope = (fileEl && fileEl.closest('.shiny-input-container')) || root.closest('.shiny-input-container') || root.parentElement; var txt = scope ? scope.querySelector('input.form-control[type=\\\"text\\\"][readonly], input[type=\\\"text\\\"][readonly]') : null; if (!txt && retries > 0) { setTimeout(function(){ check(retries - 1); }, 100); return; } if (txt) { txt.value = '%s'; txt.placeholder = '%s'; txt.dispatchEvent(new Event('input', { bubbles: true })); txt.dispatchEvent(new Event('change', { bubbles: true })); } if (window.jQuery) { var jqScope = window.jQuery(fileEl || root).closest('.shiny-input-container'); var jq = jqScope.find('input.form-control[type=\\\"text\\\"][readonly], input[type=\\\"text\\\"][readonly]').first(); if (jq.length) { jq.val('%s'); jq.attr('placeholder', '%s'); jq.trigger('input'); jq.trigger('change'); } } })(40);",
       safe_db, safe_db, safe_db, safe_db
     )
     shinyjs::runjs(js_code)
   }
+
+  # Keep the visible fileInput label in sync whenever the hidden DB field changes,
+  # including initial auto-detection during app startup.
+  observeEvent(input$master_db, {
+    session$onFlushed(function() {
+      sync_master_db_upload_label(input$master_db)
+    }, once = TRUE)
+  }, ignoreInit = FALSE)
 
   observeEvent(input$browse_root, {
     req(input$browse_root > 0)
