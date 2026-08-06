@@ -234,152 +234,27 @@ discover_kcp_catalog <- function(master_dir) {
   if (!is.null(catalog)) catalog[order(catalog$TypeOrder, catalog$KCP_Name), ] else NULL
 }
 
-# Vectorized string parsing to extract values for a specific key
-  # efficiently using regular expressions over the entire array.
-  extract_group_values_vectorized <- function(vec, target_key) {
-    escaped_key <- gsub("([.|()\\\\^{}+$*?])", "\\\\\\1", target_key)
-    pat_eq <- sprintf("(?:^|\\s)%s=([^\\s]+)", escaped_key)
-    pat_alone <- sprintf("(?:^|\\s)(%s)(?:\\s|$)", escaped_key)
-    
-    m_alone <- regexpr(pat_alone, vec, perl=TRUE)
-    m_eq <- regexpr(pat_eq, vec, perl=TRUE)
-    
-    parsed_vals <- rep(NA_character_, length(vec))
-    parsed_vals[m_alone != -1] <- target_key
-    
-    idx_eq <- m_eq != -1
-    if (any(idx_eq)) {
-      starts <- attr(m_eq, "capture.start")[, 1]
-      lengths <- attr(m_eq, "capture.length")[, 1]
-      parsed_vals[idx_eq] <- substring(vec[idx_eq], starts[idx_eq], 
-starts[idx_eq] + lengths[idx_eq] - 1)
-    }
-    
-    # Automatically remove explicit "NA" string values
-    parsed_vals[!is.na(parsed_vals) & toupper(trimws(parsed_vals)) %in% 
-c("NA", "<NA>", "NULL", "NONE")] <- NA_character_
-    
-    return(parsed_vals)
+# Connects to SQLite DB and retrieves unique group strings, ignoring 'excluded_groups'
+get_groups_from_db <- function(db_path, table_name, group_col, excluded_groups) {
+  if (!file.exists(db_path)) return(character(0))
+  con <- dbConnect(SQLite(), db_path)
+  on.exit(dbDisconnect(con), add = TRUE) # Ensure we close the DB connection automatically 
+  
+  # Ensure the target table actually exists
+  if (!dbExistsTable(con, table_name)) {
+    stop(sprintf("Table '%s' could not be found in the database. Please check the 'Stand Initialization Table' name.", table_name))
   }
-
-  normalize_excluded_groups <- function(values) {
-    if (is.null(values) || length(values) == 0) return(character(0))
-    if (length(values) == 1) {
-      values <- unlist(strsplit(values, "\\s*,\\s*"))
-    }
-    values <- trimws(as.character(values))
-    values[!is.na(values) & nzchar(values)]
+  
+  # Ensure the grouping column exists in the table
+  table_cols <- dbListFields(con, table_name)
+  if (!(group_col %in% table_cols)) {
+    stop(sprintf("Column '%s' could not be found in the table '%s'. Please check the 'Database Grouping Column' name.", group_col, table_name))
   }
-
-  get_group_column_choices <- function(db_path, stand_tbl) {
-    if (!file.exists(db_path) || !nzchar(trimws(stand_tbl))) return(character(0))
-    con <- dbConnect(SQLite(), db_path)
-    on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
-    if (!dbExistsTable(con, stand_tbl)) return(character(0))
-    dbListFields(con, stand_tbl)
-  }
-
-  get_unique_group_values <- function(db_path, stand_tbl, group_col) {
-    if (!file.exists(db_path) || !nzchar(trimws(stand_tbl)) || !nzchar(trimws(group_col))) return(character(0))
-    con <- dbConnect(SQLite(), db_path)
-    on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
-    if (!dbExistsTable(con, stand_tbl)) return(character(0))
-    table_cols <- dbListFields(con, stand_tbl)
-    if (!(group_col %in% table_cols)) return(character(0))
-    
-    sql <- sprintf(
-      "SELECT DISTINCT %s AS GROUP_VALUE FROM %s WHERE %s IS NOT NULL AND TRIM(CAST(%s AS TEXT)) != ''",
-      quote_sql_identifier(group_col),
-      quote_sql_identifier(stand_tbl),
-      quote_sql_identifier(group_col),
-      quote_sql_identifier(group_col)
-    )
-    values <- dbGetQuery(con, sql)$GROUP_VALUE
-    values <- trimws(as.character(values))
-    sort(unique(values[!is.na(values) & nzchar(values)]))
-  }
-
-  parse_groups_column_keys <- function(db_path, stand_tbl) {
-    if (!file.exists(db_path) || !nzchar(trimws(stand_tbl))) return(character(0))
-    con <- dbConnect(SQLite(), db_path)
-    on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
-    if (!dbExistsTable(con, stand_tbl)) return(character(0))
-    cols <- dbListFields(con, stand_tbl)
-    grp_col <- cols[toupper(cols) == "GROUPS"]
-    if (length(grp_col) == 0) return(character(0))
-    
-    sql <- sprintf("SELECT %s FROM %s WHERE %s IS NOT NULL AND TRIM(CAST(%s AS TEXT)) != ''",
-                   quote_sql_identifier(grp_col[1]), quote_sql_identifier(stand_tbl), 
-                   quote_sql_identifier(grp_col[1]), quote_sql_identifier(grp_col[1]))
-    vals <- dbGetQuery(con, sql)[[1]]
-    if (length(vals) == 0) return(character(0))
-    
-    parts <- unlist(strsplit(vals[!is.na(vals)], "\\s+"))
-    parts <- parts[nzchar(parts)]
-    keys <- sub("=.*$", "", parts)
-    
-    # Automatically filter out explicit "NA" standalone keys
-    keys <- keys[keys != "NA"]
-    
-    sort(unique(keys))
-  }
-
-  get_unique_group_values_parsed <- function(db_path, stand_tbl, parsed_key) {
-    if (!file.exists(db_path) || !nzchar(trimws(stand_tbl)) || !nzchar(trimws(parsed_key))) return(character(0))
-    con <- dbConnect(SQLite(), db_path)
-    on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
-    if (!dbExistsTable(con, stand_tbl)) return(character(0))
-    cols <- dbListFields(con, stand_tbl)
-    grp_col <- cols[toupper(cols) == "GROUPS"]
-    if (length(grp_col) == 0) return(character(0))
-    
-    sql <- sprintf("SELECT %s FROM %s WHERE %s IS NOT NULL AND TRIM(CAST(%s AS TEXT)) != ''",
-                   quote_sql_identifier(grp_col[1]), quote_sql_identifier(stand_tbl), 
-                   quote_sql_identifier(grp_col[1]), quote_sql_identifier(grp_col[1]))
-    vals <- dbGetQuery(con, sql)[[1]]
-    if (length(vals) == 0) return(character(0))
-    
-    all_vals <- unique(extract_group_values_vectorized(vals, parsed_key))
-    all_vals <- all_vals[!is.na(all_vals)]
-    sort(all_vals[nzchar(all_vals)])
-  }
-
-  # Connects to SQLite DB and retrieves unique group strings, ignoring 'excluded_groups'
-  get_groups_from_db <- function(db_path, table_name, group_col, excluded_groups, use_groups = FALSE) {
-    if (!file.exists(db_path)) return(character(0))
-    con <- dbConnect(SQLite(), db_path)
-    on.exit(dbDisconnect(con), add = TRUE) # Ensure we close the DB connection automatically 
-    
-    # Ensure the target table actually exists
-    if (!dbExistsTable(con, table_name)) {
-      stop(sprintf("Table '%s' could not be found in the database. Please check the 'Stand Initialization Table' name.", table_name))
-    }
-    
-    table_cols <- dbListFields(con, table_name)
-    
-    if (isTRUE(use_groups)) {
-      grp_col_candidates <- table_cols[toupper(table_cols) == "GROUPS"]
-      if (length(grp_col_candidates) == 0) {
-        stop(sprintf("Column 'GROUPS' could not be found in table '%s'.", table_name))
-      }
-      grp_col_name <- grp_col_candidates[1]
-      
-      sql <- sprintf("SELECT %s FROM %s WHERE %s IS NOT NULL AND TRIM(CAST(%s AS TEXT)) != ''",
-                     quote_sql_identifier(grp_col_name), quote_sql_identifier(table_name),
-                     quote_sql_identifier(grp_col_name), quote_sql_identifier(grp_col_name))
-      vals <- dbGetQuery(con, sql)[[1]]
-      if (length(vals) == 0) return(character(0))
-      
-      parsed_unique <- unique(extract_group_values_vectorized(vals, group_col))
-      groups <- as.character(parsed_unique[!is.na(parsed_unique)])
-    } else {
-      if (!(group_col %in% table_cols)) {
-        stop(sprintf("Column '%s' could not be found in the table '%s'. Please check the 'Database Grouping Column' name.", group_col, table_name))
-      }
-      sql <- sprintf("SELECT DISTINCT %s AS GROUP_CODE FROM %s", quote_sql_identifier(group_col), quote_sql_identifier(table_name))
-      groups <- dbGetQuery(con, sql)$GROUP_CODE
-      groups <- as.character(groups)
-    }
+  
+  # Execute select distinct query on the grouping column
+  sql <- sprintf("SELECT DISTINCT %s AS GROUP_CODE FROM %s", quote_sql_identifier(group_col), quote_sql_identifier(table_name))
+  groups <- dbGetQuery(con, sql)$GROUP_CODE
+  groups <- as.character(groups)
   
   # Filter out empty strings, NA, or user excluded groups (e.g. 'Riparian')
   groups <- groups[!is.na(groups) & nzchar(trimws(groups))]
