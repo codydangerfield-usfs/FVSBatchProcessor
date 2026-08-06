@@ -163,8 +163,10 @@ ui <- page_fillable(
         ),
         hr(),
         textInput("stand_tbl", "Stand Initialization Table", value = "FVS_STANDINIT"),
-        textInput("group_col", "Database Grouping Column", value = "VARIANT"),
-        textInput("exclude_grps", "Excluded Groups (Comma-separated)", value = ""),
+        checkboxInput("use_groups_col", "Use GROUPS", value = FALSE),
+        selectInput("group_col", "Database Grouping Column", choices = "VARIANT", selected = "VARIANT"),
+        selectizeInput("exclude_grps", "Excluded Groups", choices = NULL, selected = NULL, multiple = TRUE,
+                       options = list(placeholder = "Select group values to exclude")),
         hr(),
         actionButton("load_metadata", "Scan Directories & Connect DB", class = "btn-primary w-100")
       ),

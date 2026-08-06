@@ -242,6 +242,56 @@ server <- function(input, output, session) {
     }
   }, ignoreInit = TRUE)
   
+  refresh_grouping_controls <- function() {
+    req(input$master_db, input$root_dir, input$stand_tbl)
+    full_db_path <- resolve_db_path(input$root_dir, input$master_db)
+    if (!file.exists(full_db_path)) return()
+    
+    use_grp <- isTRUE(isolate(input$use_groups_col))
+    
+    if (use_grp) {
+      cols <- tryCatch(
+        parse_groups_column_keys(full_db_path, input$stand_tbl),
+        error = function(e) character(0)
+      )
+    } else {
+      cols <- tryCatch(
+        get_group_column_choices(full_db_path, input$stand_tbl),
+        error = function(e) character(0)
+      )
+      cols <- cols[!toupper(cols) %in% "GROUPS"]
+    }
+    
+    current_group_col <- isolate(input$group_col)
+    selected_group_col <- if (length(cols) == 0) {
+      character(0)
+    } else if (length(current_group_col) == 1 && nzchar(current_group_col) && current_group_col %in% cols) {
+      current_group_col
+    } else if (!use_grp && "VARIANT" %in% cols) {
+      "VARIANT"
+    } else {
+      cols[1]
+    }
+    
+    updateSelectInput(session, "group_col", choices = cols, selected = selected_group_col)
+    
+    group_values <- if (length(selected_group_col) == 1 && nzchar(selected_group_col)) {
+      tryCatch({
+        if (use_grp) {
+          get_unique_group_values_parsed(full_db_path, input$stand_tbl, selected_group_col)
+        } else {
+          get_unique_group_values(full_db_path, input$stand_tbl, selected_group_col)
+        }
+      }, error = function(e) character(0))
+    } else {
+      character(0)
+    }
+    
+    current_excluded <- normalize_excluded_groups(isolate(input$exclude_grps))
+    retained_excluded <- current_excluded[current_excluded %in% group_values]
+    updateSelectizeInput(session, "exclude_grps", choices = group_values, selected = retained_excluded, server = TRUE)
+  }
+  
   observeEvent(input$stand_tbl, {
     req(input$master_db, input$root_dir, input$stand_tbl)
     full_db_path <- resolve_db_path(input$root_dir, input$master_db)
@@ -252,6 +302,18 @@ server <- function(input, output, session) {
           on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
           if (dbExistsTable(con, input$stand_tbl)) {
             cols <- dbListFields(con, input$stand_tbl)
+            
+            if ("INV_YEAR" %in% toupper(cols)) {
+              inv_query <- sprintf("SELECT INV_YEAR FROM %s WHERE INV_YEAR IS NOT NULL AND TRIM(CAST(INV_YEAR AS TEXT)) != '' GROUP BY INV_YEAR ORDER BY COUNT(*) DESC LIMIT 1", quote_sql_identifier(input$stand_tbl))
+              inv_df <- dbGetQuery(con, inv_query)
+              if (nrow(inv_df) > 0) {
+                inv_val <- suppressWarnings(as.numeric(inv_df$INV_YEAR[1]))
+                if (!is.na(inv_val)) {
+                  updateNumericInput(session, "inv_year", value = inv_val)
+                }
+              }
+            }
+            
             if ("VARIANT" %in% toupper(cols)) {
               var_query <- sprintf("SELECT DISTINCT VARIANT FROM %s WHERE VARIANT IS NOT NULL AND TRIM(VARIANT) != ''", quote_sql_identifier(input$stand_tbl))
               var_df <- dbGetQuery(con, var_query)
@@ -267,6 +329,29 @@ server <- function(input, output, session) {
       }, error = function(e) {})
     }
   }, ignoreInit = TRUE)
+  
+  observeEvent(list(input$use_groups_col, input$master_db, input$root_dir, input$stand_tbl), {
+    refresh_grouping_controls()
+  }, ignoreInit = FALSE)
+  
+  observeEvent(input$group_col, {
+    req(input$master_db, input$root_dir, input$stand_tbl)
+    full_db_path <- resolve_db_path(input$root_dir, input$master_db)
+    if (!file.exists(full_db_path)) return()
+    
+    use_grp <- isTRUE(isolate(input$use_groups_col))
+    group_values <- tryCatch({
+      if (use_grp) {
+        get_unique_group_values_parsed(full_db_path, input$stand_tbl, input$group_col)
+      } else {
+        get_unique_group_values(full_db_path, input$stand_tbl, input$group_col)
+      }
+    }, error = function(e) character(0))
+    
+    current_excluded <- normalize_excluded_groups(isolate(input$exclude_grps))
+    retained_excluded <- current_excluded[current_excluded %in% group_values]
+    updateSelectizeInput(session, "exclude_grps", choices = group_values, selected = retained_excluded, server = TRUE)
+  }, ignoreInit = FALSE)
   
   manifest_path <- reactive({
     req(input$root_dir)
@@ -315,11 +400,25 @@ server <- function(input, output, session) {
         has_var <- "VARIANT" %in% toupper(cols)
         var_str <- if (has_var) ", VARIANT" else ""
         
-        query <- sprintf("SELECT STAND_ID, STAND_CN, %s AS GROUP_CODE %s FROM %s", 
-                         quote_sql_identifier(input$group_col), var_str, quote_sql_identifier(input$stand_tbl))
-        res <- dbGetQuery(con, query)
-        attr(res, "has_var") <- has_var
-        res
+        if (isTRUE(isolate(input$use_groups_col))) {
+          grp_col <- cols[toupper(cols) == "GROUPS"]
+          if (length(grp_col) == 0) return(NULL)
+          query <- sprintf("SELECT STAND_ID, STAND_CN, %s AS GROUPS_RAW %s FROM %s", 
+                           quote_sql_identifier(grp_col[1]), var_str, quote_sql_identifier(input$stand_tbl))
+          res <- dbGetQuery(con, query)
+          target_key <- isolate(input$group_col)
+          
+          res$GROUP_CODE <- extract_group_values_vectorized(res$GROUPS_RAW, target_key)
+          res$GROUPS_RAW <- NULL
+          attr(res, "has_var") <- has_var
+          res
+        } else {
+          query <- sprintf("SELECT STAND_ID, STAND_CN, %s AS GROUP_CODE %s FROM %s", 
+                           quote_sql_identifier(input$group_col), var_str, quote_sql_identifier(input$stand_tbl))
+          res <- dbGetQuery(con, query)
+          attr(res, "has_var") <- has_var
+          res
+        }
       })
       
       if (is.null(stInitDF)) return(NULL)
@@ -331,7 +430,7 @@ server <- function(input, output, session) {
       }
       
       
-      ex_groups <- unlist(strsplit(input$exclude_grps, "\\s*,\\s*"))
+      ex_groups <- normalize_excluded_groups(input$exclude_grps)
       stInitDF <- subset(stInitDF, !is.na(GROUP_CODE) & nzchar(GROUP_CODE) & !(tolower(GROUP_CODE) %in% tolower(ex_groups)))
       
       manifest_df <- read.csv(m_file, stringsAsFactors = FALSE, colClasses = "character")
@@ -391,7 +490,7 @@ server <- function(input, output, session) {
     
     err_msg <- NULL
     withProgress(message = "Extracting file indexing mappings & building DB indexes...", value = 0.5, {
-      ex_groups <- unlist(strsplit(input$exclude_grps, "\\s*,\\s*"))
+      ex_groups <- normalize_excluded_groups(input$exclude_grps)
       tryCatch({
         local({
           con_m <- dbConnect(SQLite(), full_db_path)
@@ -411,7 +510,7 @@ server <- function(input, output, session) {
           }
         })
         
-        meta$groups <- get_groups_from_db(full_db_path, input$stand_tbl, input$group_col, ex_groups)
+        meta$groups <- get_groups_from_db(full_db_path, input$stand_tbl, input$group_col, ex_groups, isolate(input$use_groups_col))
         meta$catalog <- discover_kcp_catalog(full_kcp_dir)
       }, error = function(e) {
         err_msg <<- e$message
