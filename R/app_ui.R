@@ -168,7 +168,8 @@ ui <- page_fillable(
         selectizeInput("exclude_grps", "Excluded Groups", choices = NULL, selected = NULL, multiple = TRUE,
                        options = list(placeholder = "Select group values to exclude")),
         hr(),
-        actionButton("load_metadata", "Scan Directories & Connect DB", class = "btn-primary w-100")
+        actionButton("load_metadata", "Scan Directories & Connect DB", class = "btn-primary w-100"),
+        div(style = "height: 8rem;")
       ),
       conditionalPanel(
         condition = "input.main_tabs == 'tab2'",
