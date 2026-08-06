@@ -1,4 +1,4 @@
-export(run_app)
+export(fvsRunBatch)
 import(shiny)
 import(bslib)
 import(rhandsontable)
