@@ -17,6 +17,7 @@ remotes::install_github("https://github.com/codydangerfield-usfs/FVSBatchProcess
 
 ```r
 library(FVSBatchProcessor)
+setwd(<FVS_Project_Folder>)
 fvsRunBatch()
 ```
 
