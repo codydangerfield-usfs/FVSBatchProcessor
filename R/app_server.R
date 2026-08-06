@@ -29,12 +29,6 @@ server <- function(input, output, session) {
     sprintf("%02d:%02d:%02d", hh, mm, ss)
   }
 
-  ensure_cancel_visible <- function(button_id) {
-    session$onFlushed(function() {
-      shinyjs::show(button_id)
-    }, once = TRUE)
-  }
-  
   # --- UI BUTTON BROWSER EVENT OBSERVERS ---
 
   # Use the user's active session wd instead of the package directory.
@@ -780,7 +774,7 @@ server <- function(input, output, session) {
     unique_scenarios <- unique(job_queue$Scenario)
     total_jobs <- nrow(job_queue)
 
-    ensure_cancel_visible("kill_gen_btn")
+    shinyjs::show("kill_gen_btn")
     
     writeLines("0|Booting up compute cluster (this may take a moment)...", prog_file_gen)
     gen_prog <<- shiny::Progress$new(session, min=0, max=1)
@@ -965,7 +959,7 @@ server <- function(input, output, session) {
     p_overwrite <- input$overwrite_scens
     if (is.null(p_overwrite)) p_overwrite <- character(0)
 
-    ensure_cancel_visible("kill_run_btn")
+    shinyjs::show("kill_run_btn")
     
     writeLines("0|Booting up compute cluster (this may take a moment)...", prog_file_run)
     run_prog <<- shiny::Progress$new(session, min=0, max=1)
@@ -1151,7 +1145,7 @@ server <- function(input, output, session) {
     p_cores      <- input$num_cores_merge
     if (is.na(p_cores) || p_cores < 1) p_cores <- 1
 
-    ensure_cancel_visible("kill_merge_btn")
+    shinyjs::show("kill_merge_btn")
     
     writeLines("0|Booting up compute cluster (this may take a moment)...", prog_file_merge)
     merge_prog <<- shiny::Progress$new(session, min=0, max=1)
