@@ -28,6 +28,12 @@ server <- function(input, output, session) {
     ss <- secs %% 60
     sprintf("%02d:%02d:%02d", hh, mm, ss)
   }
+
+  ensure_cancel_visible <- function(button_id) {
+    session$onFlushed(function() {
+      shinyjs::show(button_id)
+    }, once = TRUE)
+  }
   
   # --- UI BUTTON BROWSER EVENT OBSERVERS ---
 
@@ -750,7 +756,6 @@ server <- function(input, output, session) {
   # ----------------- PIPELINE STEP 1: PARALLEL KEYFILE GENERATION -----------------
   observeEvent(input$gen_keyfiles, {
     shinyjs::disable("gen_keyfiles")
-    shinyjs::show("kill_gen_btn")
     step_start_gen(Sys.time())
     
     job_queue <- get_job_queue()
@@ -774,6 +779,8 @@ server <- function(input, output, session) {
     
     unique_scenarios <- unique(job_queue$Scenario)
     total_jobs <- nrow(job_queue)
+
+    ensure_cancel_visible("kill_gen_btn")
     
     writeLines("0|Booting up compute cluster (this may take a moment)...", prog_file_gen)
     gen_prog <<- shiny::Progress$new(session, min=0, max=1)
@@ -875,6 +882,7 @@ server <- function(input, output, session) {
     invalidateLater(500, session)
     
     if (p$is_alive()) {
+      shinyjs::show("kill_gen_btn")
       if (file.exists(prog_file_gen)) {
         l <- suppressWarnings(readLines(prog_file_gen))
         if (length(l) > 0) {
@@ -930,7 +938,6 @@ server <- function(input, output, session) {
   # ----------------- PIPELINE STEP 2: PARALLEL rFVS ENGINE RUNS -----------------
   observeEvent(input$run_rfvs, {
     shinyjs::disable("run_rfvs")
-    shinyjs::show("kill_run_btn")
     step_start_run(Sys.time())
     
     job_queue <- get_job_queue()
@@ -957,6 +964,8 @@ server <- function(input, output, session) {
     
     p_overwrite <- input$overwrite_scens
     if (is.null(p_overwrite)) p_overwrite <- character(0)
+
+    ensure_cancel_visible("kill_run_btn")
     
     writeLines("0|Booting up compute cluster (this may take a moment)...", prog_file_run)
     run_prog <<- shiny::Progress$new(session, min=0, max=1)
@@ -1067,6 +1076,7 @@ server <- function(input, output, session) {
     invalidateLater(500, session)
     
     if (p$is_alive()) {
+      shinyjs::show("kill_run_btn")
       if (file.exists(prog_file_run)) {
         l <- suppressWarnings(readLines(prog_file_run))
         if (length(l) > 0) {
@@ -1122,7 +1132,6 @@ server <- function(input, output, session) {
   # ----------------- PIPELINE STEP 3: CONSOLIDATE MASTER OUTPUTS -----------------
   observeEvent(input$merge_outputs, {
     shinyjs::disable("merge_outputs")
-    shinyjs::show("kill_merge_btn")
     step_start_merge(Sys.time())
     
     job_queue <- get_job_queue()
@@ -1141,6 +1150,8 @@ server <- function(input, output, session) {
     total_combos  <- nrow(unique_combos)
     p_cores      <- input$num_cores_merge
     if (is.na(p_cores) || p_cores < 1) p_cores <- 1
+
+    ensure_cancel_visible("kill_merge_btn")
     
     writeLines("0|Booting up compute cluster (this may take a moment)...", prog_file_merge)
     merge_prog <<- shiny::Progress$new(session, min=0, max=1)
@@ -1312,6 +1323,7 @@ server <- function(input, output, session) {
     invalidateLater(500, session)
     
     if (p$is_alive()) {
+      shinyjs::show("kill_merge_btn")
       if (file.exists(prog_file_merge)) {
         l <- suppressWarnings(readLines(prog_file_merge))
         if (length(l) > 0) {
