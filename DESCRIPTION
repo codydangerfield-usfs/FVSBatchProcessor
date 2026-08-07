@@ -10,11 +10,10 @@ License: MIT + file LICENSE
 Encoding: UTF-8
 LazyData: true
 Depends:
-    R (>= 4.2.0),
-    shiny,
-    shinyjs
-
+    R (>= 4.2.0)
 Imports:
+    shiny,
+    shinyjs,
     bslib,
     RSQLite,
     rhandsontable,

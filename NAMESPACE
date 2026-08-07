@@ -1,5 +1,6 @@
 export(fvsRunBatch)
 import(shiny)
+import(shinyjs)
 import(bslib)
 import(rhandsontable)
 import(openxlsx)

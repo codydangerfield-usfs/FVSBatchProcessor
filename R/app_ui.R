@@ -1,9 +1,10 @@
 # Auto-generated from rFVS_BatchProcessor_rShiny_v2.R
 # Split for package structure on 2026-07-29 11:06:54
 
-ui <- page_fillable(
-  theme = bs_theme(version = 5, bootswatch = "flatly"),
-  padding = 0,
+ui <- function(request) {
+  page_fillable(
+    theme = bs_theme(version = 5, bootswatch = "flatly"),
+    padding = 0,
   
   tags$head(
     tags$style(HTML("
@@ -367,3 +368,4 @@ ui <- page_fillable(
   )
 )
 
+}
