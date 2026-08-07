@@ -147,7 +147,10 @@ ui <- page_fillable(
         ),
         
         tags$label("Master Database File", class = "form-label", `for` = "master_db_upload"),
-        fileInput("master_db_upload", NULL, accept = c(".db", ".sqlite"), buttonLabel = "Browse...", placeholder = "<FVS_Input.db>", width = "100%"),
+        div(class = "input-group mb-3",
+          actionButton("browse_db", "Browse..."),
+          fileInput("master_db_upload", NULL, accept = c(".db", ".sqlite"), buttonLabel = "Browse...", placeholder = "<FVS_Input.db>", width = "100%")
+        ),
         div(style = "display:none;", textInput("master_db", label = NULL, value = "")),
         
         tags$label("KCP Directory Name", class = "form-label", `for` = "kcp_dir"),
@@ -190,11 +193,7 @@ ui <- page_fillable(
         numericInput("inv_year", "Inventory Baseline Start Year", value = 2024, min = 1900, step = 1),
         hr(),
         actionButton("gen_keyfiles", "Generate Stand Keyfiles", icon = icon("cogs"), class = "btn-primary w-100 mb-2"),
-        div(
-          id = "kill_gen_btn_wrap",
-          style = "display:none;",
-          actionButton("kill_gen_btn", "Cancel", icon = icon("xmark"), class = "btn-danger w-100")
-        )
+        shinyjs::hidden(actionButton("kill_gen_btn", "Cancel", icon = icon("xmark"), class = "btn-danger w-100"))
       ),
       conditionalPanel(
         condition = "input.main_tabs == 'tab4'",
@@ -207,11 +206,7 @@ ui <- page_fillable(
         h5("Execution Workflow"),
         selectInput("overwrite_scens", "Force Overwrite Specific Scenarios:", choices = NULL, multiple = TRUE),
         actionButton("run_rfvs", "Execute Parallel rFVS Engine", icon = icon("play"), class = "btn-primary w-100 mb-2"),
-        div(
-          id = "kill_run_btn_wrap",
-          style = "display:none;",
-          actionButton("kill_run_btn", "Cancel", icon = icon("xmark"), class = "btn-danger w-100")
-        )
+        shinyjs::hidden(actionButton("kill_run_btn", "Cancel", icon = icon("xmark"), class = "btn-danger w-100"))
       ),
       conditionalPanel(
         condition = "input.main_tabs == 'tab5'",
@@ -220,11 +215,7 @@ ui <- page_fillable(
         hr(),
         p("Merge individual stand databases into Group/Scenario databases, and then combine them all into a single master database."),
         actionButton("merge_outputs", "Consolidate Master Outputs", icon = icon("database"), class = "btn-primary w-100 mb-2"),
-        div(
-          id = "kill_merge_btn_wrap",
-          style = "display:none;",
-          actionButton("kill_merge_btn", "Cancel", icon = icon("xmark"), class = "btn-danger w-100")
-        )
+        shinyjs::hidden(actionButton("kill_merge_btn", "Cancel", icon = icon("xmark"), class = "btn-danger w-100"))
       )
     ),
     

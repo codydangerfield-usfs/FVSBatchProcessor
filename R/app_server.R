@@ -61,6 +61,33 @@ server <- function(input, output, session) {
     ss <- secs %% 60
     sprintf("%02d:%02d:%02d", hh, mm, ss)
   }
+
+  # Use the caller working directory (set in fvsRunBatch) as the runtime root.
+  dynamic_wd <- getShinyOption("FVS_USER_WD", default = getwd())
+
+  normalize_dir_input <- function(path, fallback = dynamic_wd) {
+    if (is.null(path) || length(path) == 0 || is.na(path[1])) {
+      path <- ""
+    } else {
+      path <- path[1]
+    }
+    path <- trimws(as.character(path))
+    if (!nzchar(path)) path <- fallback
+    normalizePath(path, winslash = "/", mustWork = FALSE)
+  }
+
+  sync_master_db_upload_label <- function(db_label) {
+    safe_db <- trimws(as.character(db_label))
+    if (!nzchar(safe_db)) safe_db <- "<FVS_Input.db>"
+    session$sendCustomMessage("set_master_db_label", list(value = safe_db))
+  }
+
+  observeEvent(input$master_db, {
+    db_label <- trimws(as.character(input$master_db))
+    session$onFlushed(function() {
+      sync_master_db_upload_label(db_label)
+    }, once = TRUE)
+  }, ignoreInit = FALSE)
   
   # --- UI BUTTON BROWSER EVENT OBSERVERS ---
   observeEvent(input$browse_root, {
@@ -92,27 +119,154 @@ server <- function(input, output, session) {
       updateTextInput(session, "kcp_dir", value = normalizePath(dir, winslash = "/", mustWork = FALSE))
     }
   })
+
+  observeEvent(input$master_db_upload, {
+    file_info <- input$master_db_upload
+    req(file_info)
+
+    runtime_root <- normalizePath(input$root_dir, winslash = "/", mustWork = FALSE)
+    inputs_dir <- normalizePath(file.path(runtime_root, "Inputs"), winslash = "/", mustWork = FALSE)
+    if (!dir.exists(inputs_dir)) dir.create(inputs_dir, recursive = TRUE, showWarnings = FALSE)
+
+    db_name <- basename(file_info$name)
+    db_dest <- file.path(inputs_dir, db_name)
+    copied <- tryCatch(file.copy(file_info$datapath, db_dest, overwrite = TRUE), error = function(e) FALSE)
+
+    if (!isTRUE(copied)) {
+      showNotification("Failed to stage uploaded database into Inputs.", type = "error")
+      return()
+    }
+
+    updateTextInput(session, "master_db", value = db_name)
+    sync_master_db_upload_label(db_name)
+    showNotification(sprintf("Master database staged to %s", db_dest), type = "message")
+  }, ignoreInit = TRUE)
+
+  find_input_dir <- function(root_dir) {
+    top_dirs <- tryCatch(list.dirs(root_dir, full.names = TRUE, recursive = FALSE), error = function(e) character(0))
+    if (length(top_dirs) == 0) return("")
+    top_dirs <- unique(normalizePath(top_dirs, winslash = "/", mustWork = FALSE))
+
+    candidate_input_dirs <- top_dirs[grepl("input", basename(top_dirs), ignore.case = TRUE)]
+    exact_input <- candidate_input_dirs[tolower(basename(candidate_input_dirs)) %in% c("input", "inputs")]
+    if (length(exact_input) > 0) candidate_input_dirs <- exact_input
+
+    if (length(candidate_input_dirs) == 0) return("")
+    normalizePath(candidate_input_dirs[1], winslash = "/", mustWork = FALSE)
+  }
+
+  find_kcp_dir <- function(root_dir) {
+    top_dirs <- tryCatch(list.dirs(root_dir, full.names = TRUE, recursive = FALSE), error = function(e) character(0))
+    if (length(top_dirs) == 0) return("")
+    top_dirs <- unique(normalizePath(top_dirs, winslash = "/", mustWork = FALSE))
+
+    kcp_matches <- top_dirs[grepl("kcp", basename(top_dirs), ignore.case = TRUE)]
+    exact_kcp <- kcp_matches[tolower(basename(kcp_matches)) %in% c("kcp", "kcp_catalog")]
+    if (length(exact_kcp) > 0) kcp_matches <- exact_kcp
+
+    if (length(kcp_matches) == 0) return("")
+    normalizePath(kcp_matches[1], winslash = "/", mustWork = FALSE)
+  }
+
+  detect_single_db_name <- function(root_dir) {
+    input_dir <- find_input_dir(root_dir)
+    if (!nzchar(input_dir)) return("<FVS_Input.db>")
+
+    available_dbs <- tryCatch(
+      list.files(input_dir, pattern = "\\.(db|sqlite)$", ignore.case = TRUE, full.names = FALSE),
+      error = function(e) character(0)
+    )
+    if (length(available_dbs) == 1) available_dbs[1] else "<FVS_Input.db>"
+  }
   
   resolve_db_path <- function(root_dir, db_name, slash = "/") {
     db_name <- trimws(db_name)
+    if (!nzchar(db_name) || grepl("^<.*>$", db_name)) {
+      db_name <- detect_single_db_name(root_dir)
+    }
     if (grepl("^([A-Za-z]:|\\\\|/)", db_name)) {
       normalizePath(db_name, winslash = slash, mustWork = FALSE)
     } else {
-      normalizePath(file.path(root_dir, "Inputs", db_name), winslash = slash, mustWork = FALSE)
+      input_dir <- find_input_dir(root_dir)
+      if (!nzchar(input_dir)) input_dir <- normalizePath(file.path(root_dir, "Inputs"), winslash = "/", mustWork = FALSE)
+      normalizePath(file.path(input_dir, db_name), winslash = slash, mustWork = FALSE)
     }
   }
   
   resolve_kcp_path <- function(root_dir, dir_name, slash = "/") {
     dir_name <- trimws(dir_name)
+    if (!nzchar(dir_name) || identical(dir_name, "KCP_Catalog")) {
+      detected_kcp <- find_kcp_dir(root_dir)
+      if (nzchar(detected_kcp)) dir_name <- detected_kcp
+    }
     if (grepl("^([A-Za-z]:|\\\\|/)", dir_name)) {
       normalizePath(dir_name, winslash = slash, mustWork = FALSE)
     } else {
       normalizePath(file.path(root_dir, dir_name), winslash = slash, mustWork = FALSE)
     }
   }
+
+  derive_runtime_defaults <- function(project_root) {
+    root <- normalizePath(project_root, winslash = "/", mustWork = FALSE)
+    db_default <- detect_single_db_name(root)
+    kcp_detected <- find_kcp_dir(root)
+    kcp_default <- if (nzchar(kcp_detected)) kcp_detected else "KCP_Catalog"
+    list(root = root, db = db_default, kcp = kcp_default)
+  }
+
+  defaults_initialized <- reactiveVal(FALSE)
+
+  observe({
+    if (isTRUE(defaults_initialized())) return()
+
+    caller_wd <- getShinyOption("FVS_USER_WD", default = getwd())
+    d <- derive_runtime_defaults(caller_wd)
+    if (!nzchar(trimws(as.character(d$db)))) d$db <- "<FVS_Input.db>"
+
+    updateTextInput(session, "root_dir", value = d$root)
+    updateTextInput(session, "master_db", value = d$db)
+    updateTextInput(session, "kcp_dir", value = d$kcp)
+    sync_master_db_upload_label(d$db)
+    defaults_initialized(TRUE)
+  })
+
+  observeEvent(input$root_dir, {
+    runtime_root <- normalize_dir_input(input$root_dir, fallback = getShinyOption("FVS_USER_WD", default = getwd()))
+    detected_db <- detect_single_db_name(runtime_root)
+    if (!nzchar(trimws(as.character(detected_db)))) detected_db <- "<FVS_Input.db>"
+    updateTextInput(session, "master_db", value = detected_db)
+    sync_master_db_upload_label(detected_db)
+  }, ignoreInit = TRUE)
   
   meta <- reactiveValues(groups = NULL, catalog = NULL, types = NULL)
   grid_data <- reactiveVal(data.frame())
+
+  observeEvent(c(input$master_db, input$root_dir), {
+    req(input$master_db, input$root_dir)
+    full_db_path <- resolve_db_path(input$root_dir, input$master_db)
+    if (file.exists(full_db_path)) {
+      tryCatch({
+        local({
+          con <- dbConnect(SQLite(), full_db_path)
+          on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
+          tables <- dbGetQuery(con, "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'FVS_StandInit%'")$name
+          if (length(tables) > 0) {
+            tables_lower <- tolower(tables)
+            if ("fvs_standinit_cond" %in% tables_lower) {
+              target_tbl <- tables[tables_lower == "fvs_standinit_cond"][1]
+            } else if ("fvs_standinit" %in% tables_lower) {
+              target_tbl <- tables[tables_lower == "fvs_standinit"][1]
+            } else if ("fvs_standinit_plot" %in% tables_lower) {
+              target_tbl <- tables[tables_lower == "fvs_standinit_plot"][1]
+            } else {
+              target_tbl <- tables[1]
+            }
+            updateTextInput(session, "stand_tbl", value = target_tbl)
+          }
+        })
+      }, error = function(e) {})
+    }
+  }, ignoreInit = TRUE)
   
   refresh_grouping_controls <- function() {
     req(input$master_db, input$root_dir, input$stand_tbl)
