@@ -14,14 +14,31 @@ RunBaseDir <- file.path(RootDir, "rFVS_Runs")
 ManifestFile <- file.path(RunBaseDir, "KCP_AddFile_Manifest.csv")
 # Set a visual icon/workflow diagram image name
 WorkflowImageFile <- "FVS_BatchProcessing_WorkflowDiagram.png"
+WorkflowResourcePrefix <- "workflow_assets"
 
-# Locate the workflow diagram shipped with the package (requires image in inst/www/)
-workflow_img_dir <- system.file("www", package = "fvsBatchProcessor")
+# Registers the workflow image directory for the Shiny UI.
+register_workflow_assets <- function() {
+  workflow_img_dir <- system.file("www", package = "FVSBatchProcessor")
+  if (!nzchar(workflow_img_dir)) return(FALSE)
 
-# If found, add it as a resource path available to the Shiny client UI
-if (nzchar(workflow_img_dir) && file.exists(file.path(workflow_img_dir, WorkflowImageFile))) {
-  shiny::addResourcePath("workflow_assets", normalizePath(workflow_img_dir, winslash = "/", mustWork = TRUE))
+  workflow_img_path <- file.path(workflow_img_dir, WorkflowImageFile)
+  if (!file.exists(workflow_img_path)) return(FALSE)
+
+  normalized_dir <- normalizePath(workflow_img_dir, winslash = "/", mustWork = TRUE)
+  current_paths <- shiny::resourcePaths()
+
+  if (!WorkflowResourcePrefix %in% names(current_paths)) {
+    shiny::addResourcePath(WorkflowResourcePrefix, normalized_dir)
+    return(TRUE)
+  }
+
+  identical(
+    normalizePath(current_paths[[WorkflowResourcePrefix]], winslash = "/", mustWork = FALSE),
+    normalized_dir
+  )
 }
+
+register_workflow_assets()
 
 # Determine default master database file based on contents of Inputs folder
 InputsDir <- file.path(RootDir, "Inputs")
