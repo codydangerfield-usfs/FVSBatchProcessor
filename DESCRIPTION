@@ -22,6 +22,7 @@ Imports:
     uuid,
     zip,
     shinyjs,
+    shinyFiles,
     dplyr,
     callr,
     DBI,

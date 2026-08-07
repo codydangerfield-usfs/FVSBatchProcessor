@@ -3,192 +3,38 @@
 
 # 1. GLOBAL SETTINGS & UTILITIES
 # ------------------------------------------------------------------------------
+# Increase maximum upload size to 10GB for very large database/file transfers
+options(shiny.maxRequestSize = 10000 * 1024^2)
 
-# Robust native OS folder picker wrapper.
-get_native_folder <- function(default_path = "~", caption_text = "Select a Directory") {
-  os <- Sys.info()[["sysname"]]
-  path <- NULL
-
-  # Expand home shortcut so each backend receives a concrete path.
-  default_path <- path.expand(default_path)
-
-  if (os == "Windows") {
-    win_path <- gsub("/", "\\\\", default_path)
-
-    ps_script <- paste0(
-      '$code = @"\n',
-      'using System;\n',
-      'using System.Runtime.InteropServices;\n',
-      'public class NativeFolderPicker {\n',
-      '    [DllImport("user32.dll")]\n',
-      '    private static extern IntPtr GetForegroundWindow();\n',
-      '    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]\n',
-      '    private static extern void SHCreateItemFromParsingName(\n',
-      '        [MarshalAs(UnmanagedType.LPWStr)] string pszPath,\n',
-      '        IntPtr pbc,\n',
-      '        ref Guid riid,\n',
-      '        [MarshalAs(UnmanagedType.Interface)] out IShellItem ppv);\n',
-      '    [ComImport, Guid("42f85136-db7e-439c-85f1-e4075d135fc8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]\n',
-      '    private interface IFileOpenDialog {\n',
-      '        [PreserveSig] int Show(IntPtr parent);\n',
-      '        void SetFileTypes(uint cFileTypes, IntPtr rgFilterSpec);\n',
-      '        void SetFileTypeIndex(uint iFileType);\n',
-      '        void GetFileTypeIndex(out uint piFileType);\n',
-      '        void Advise(IntPtr pfde, out uint pdwCookie);\n',
-      '        void Unadvise(uint dwCookie);\n',
-      '        void SetOptions(uint dwFlags);\n',
-      '        void GetOptions(out uint pdwFlags);\n',
-      '        void SetDefaultFolder(IShellItem psi);\n',
-      '        void SetFolder(IShellItem psi);\n',
-      '        void GetFolder(out IShellItem ppsi);\n',
-      '        void GetCurrentSelection(out IShellItem ppsi);\n',
-      '        void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string pszName);\n',
-      '        void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string pszName);\n',
-      '        void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string pszTitle);\n',
-      '        void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string pszText);\n',
-      '        void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string pszLabel);\n',
-      '        void GetResult(out IShellItem ppsi);\n',
-      '        void AddPlace(IShellItem psi, int fdap);\n',
-      '        void SetDefaultExtension([MarshalAs(UnmanagedType.LPWStr)] string pszDefaultExtension);\n',
-      '        void Close(int hr);\n',
-      '        void SetClientGuid(ref Guid guid);\n',
-      '        void ClearClientData();\n',
-      '        void SetFilter(IntPtr pFilter);\n',
-      '        void GetResults(out IntPtr ppenum);\n',
-      '        void GetSelectedItems(out IntPtr ppsai);\n',
-      '    }\n',
-      '    [ComImport, Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]\n',
-      '    private interface IShellItem {\n',
-      '        void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);\n',
-      '        void GetParent(out IShellItem ppsi);\n',
-      '        void GetDisplayName(uint sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);\n',
-      '        void GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);\n',
-      '        void Compare(IShellItem psi, uint hint, out int piOrder);\n',
-      '    }\n',
-      '    public static string Show(string initialPath, string title) {\n',
-      '        try {\n',
-      '            var dialog = (IFileOpenDialog)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7")));\n',
-      '            uint options;\n',
-      '            dialog.GetOptions(out options);\n',
-      '            dialog.SetOptions(options | 0x00000020);\n',
-      '            if (!string.IsNullOrEmpty(title)) dialog.SetTitle(title);\n',
-      '            if (!string.IsNullOrEmpty(initialPath) && System.IO.Directory.Exists(initialPath)) {\n',
-      '                try {\n',
-      '                    Guid riid = new Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe");\n',
-      '                    IShellItem item;\n',
-      '                    SHCreateItemFromParsingName(initialPath, IntPtr.Zero, ref riid, out item);\n',
-      '                    if (item != null) dialog.SetFolder(item);\n',
-      '                } catch {}\n',
-      '            }\n',
-      '            IntPtr owner = GetForegroundWindow();\n',
-      '            if (dialog.Show(owner) == 0) {\n',
-      '                IShellItem item;\n',
-      '                dialog.GetResult(out item);\n',
-      '                string chosen;\n',
-      '                item.GetDisplayName(0x80058000, out chosen);\n',
-      '                return chosen;\n',
-      '            }\n',
-      '        } catch {}\n',
-      '        return null;\n',
-      '    }\n',
-      '}\n',
-      '"@\n',
-      'Add-Type -TypeDefinition $code\n',
-      '$res = [NativeFolderPicker]::Show("', gsub('"', '`"', win_path), '", "', gsub('"', '`"', caption_text), '")\n',
-      'if ($res) { Write-Output $res }\n'
-    )
-
-    tf <- tempfile(fileext = ".ps1")
-    writeLines(ps_script, tf)
-
-    res <- tryCatch(
-      system2(
-        "powershell",
-        args = c("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", shQuote(tf)),
-        stdout = TRUE,
-        stderr = FALSE
-      ),
-      error = function(e) NULL
-    )
-
-    unlink(tf)
-    if (length(res) > 0 && nzchar(res[1])) path <- res[1]
-  } else if (os == "Darwin") {
-    script <- sprintf(
-      '\n      try\n        tell application (path to frontmost application as text)\n          activate\n          set myFolder to choose folder with prompt "%s" default location POSIX file "%s"\n        end tell\n        POSIX path of myFolder\n      end try\n    ',
-      caption_text,
-      default_path
-    )
-
-    res <- tryCatch(
-      system2("osascript", args = c("-e", shQuote(script)), stdout = TRUE, stderr = FALSE),
-      error = function(e) NULL
-    )
-    if (length(res) > 0 && !grepl("user canceled", res[1], ignore.case = TRUE)) path <- res[1]
-  } else {
-    if (nzchar(Sys.which("zenity"))) {
-      res <- tryCatch(
-        system2(
-          "zenity",
-          args = c(
-            "--file-selection", "--directory", "--modal",
-            sprintf('--title="%s"', caption_text),
-            sprintf('--filename="%s/"', default_path)
-          ),
-          stdout = TRUE,
-          stderr = FALSE
-        ),
-        error = function(e) NULL
-      )
-      if (length(res) > 0 && nzchar(res[1])) path <- res[1]
-    } else if (requireNamespace("tcltk", quietly = TRUE)) {
-      path <- tryCatch(
-        tcltk::tk_chooseDir(default = default_path, caption = caption_text),
-        error = function(e) NULL
-      )
-    }
-  }
-
-  if (is.null(path) || length(path) == 0 || identical(path, "") || is.na(path)) {
-    return(NULL)
-  }
-
-  normalizePath(as.character(path), winslash = "/", mustWork = FALSE)
-}
-
+# Determine root directory, usually one level up from this script's working dir
+RootDir <- normalizePath(dirname(getwd()), winslash = "/", mustWork = FALSE)
+# Define where simulation runs will be hosted
+RunBaseDir <- file.path(RootDir, "rFVS_Runs")
+# Set path for the KCP combinations manifest file
+ManifestFile <- file.path(RunBaseDir, "KCP_AddFile_Manifest.csv")
 # Set a visual icon/workflow diagram image name
-WorkflowImageFile <- "FVS_BatchProcessing_WorkflowDiagram_v3.png"
-WorkflowResourcePrefix <- "fvsbp_workflow_assets"
+WorkflowImageFile <- "FVS_BatchProcessing_WorkflowDiagram.png"
 
-# Registers the workflow image directory under a stable Shiny resource prefix.
-register_workflow_assets <- function() {
-  workflow_img_dirs <- c(
-    system.file("app/www", package = "FVSBatchProcessor"),
-    file.path(getwd(), "inst", "app", "www"),
-    file.path(getwd(), "app", "www"),
-    file.path(getwd(), "www"),
-    file.path(getwd(), "Scripts", "www")
-  )
+# Locate the workflow diagram shipped with the package (requires image in inst/www/)
+workflow_img_dir <- system.file("www", package = "fvsBatchProcessor")
 
-  workflow_img_dir <- workflow_img_dirs[file.exists(file.path(workflow_img_dirs, WorkflowImageFile))][1]
-  if (is.na(workflow_img_dir) || !nzchar(workflow_img_dir)) return(FALSE)
-
-  normalized <- normalizePath(workflow_img_dir, winslash = "/", mustWork = TRUE)
-  current_paths <- shiny::resourcePaths()
-
-  if (!WorkflowResourcePrefix %in% names(current_paths)) {
-    shiny::addResourcePath(WorkflowResourcePrefix, normalized)
-    return(TRUE)
-  }
-
-  identical(normalizePath(current_paths[[WorkflowResourcePrefix]], winslash = "/", mustWork = FALSE), normalized)
+# If found, add it as a resource path available to the Shiny client UI
+if (nzchar(workflow_img_dir) && file.exists(file.path(workflow_img_dir, WorkflowImageFile))) {
+  shiny::addResourcePath("workflow_assets", normalizePath(workflow_img_dir, winslash = "/", mustWork = TRUE))
 }
 
-register_workflow_assets()
+# Determine default master database file based on contents of Inputs folder
+InputsDir <- file.path(RootDir, "Inputs")
+available_dbs <- list.files(InputsDir, pattern = "\\.(db|sqlite)$", ignore.case = TRUE, full.names = FALSE)
+DefaultDB <- if (length(available_dbs) > 0) available_dbs[1] else "AllBKNF_Combined.db"
 
-# We no longer calculate DefaultDB, DefaultKCP, RootDir or ManifestFile at package compilation time
-# since they depend on the runtime environment directory. These values will be dynamically generated 
-# inside the shiny server session.
+# Determine default KCP directory based on contents of RootDir
+available_dirs <- list.dirs(RootDir, full.names = FALSE, recursive = FALSE)
+kcp_matches <- available_dirs[grepl("KCP", available_dirs, ignore.case = TRUE)]
+DefaultKCP <- if (length(kcp_matches) > 0) kcp_matches[1] else "KCP_Catalog"
+
+# Ensure the base directory for runs exists
+if (!dir.exists(RunBaseDir)) dir.create(RunBaseDir, recursive = TRUE, showWarnings = FALSE)
 
 # Helper function to remove leading numbers and special characters from a folder name
 clean_kcp_type <- function(folder_name) {
@@ -234,158 +80,7 @@ discover_kcp_catalog <- function(master_dir) {
   if (!is.null(catalog)) catalog[order(catalog$TypeOrder, catalog$KCP_Name), ] else NULL
 }
 
-# Vectorized string parsing to extract values for a specific key
-  # efficiently using regular expressions over the entire array.
-  extract_group_values_vectorized <- function(vec, target_key) {
-    escaped_key <- gsub("([.|()\\\\^{}+$*?])", "\\\\\\1", target_key)
-    pat_eq <- sprintf("(?:^|\\s)%s=([^\\s]+)", escaped_key)
-    pat_alone <- sprintf("(?:^|\\s)(%s)(?:\\s|$)", escaped_key)
-    
-    m_alone <- regexpr(pat_alone, vec, perl=TRUE)
-    m_eq <- regexpr(pat_eq, vec, perl=TRUE)
-    
-    parsed_vals <- rep(NA_character_, length(vec))
-    parsed_vals[m_alone != -1] <- target_key
-    
-    idx_eq <- m_eq != -1
-    if (any(idx_eq)) {
-      starts <- attr(m_eq, "capture.start")[, 1]
-      lengths <- attr(m_eq, "capture.length")[, 1]
-      parsed_vals[idx_eq] <- substring(vec[idx_eq], starts[idx_eq], 
-starts[idx_eq] + lengths[idx_eq] - 1)
-    }
-    
-    # Automatically remove explicit "NA" string values
-    parsed_vals[!is.na(parsed_vals) & toupper(trimws(parsed_vals)) %in% 
-c("NA", "<NA>", "NULL", "NONE")] <- NA_character_
-    
-    return(parsed_vals)
-  }
 
-  normalize_excluded_groups <- function(values) {
-    if (is.null(values) || length(values) == 0) return(character(0))
-    if (length(values) == 1) {
-      values <- unlist(strsplit(values, "\\s*,\\s*"))
-    }
-    values <- trimws(as.character(values))
-    values[!is.na(values) & nzchar(values)]
-  }
-
-  get_group_column_choices <- function(db_path, stand_tbl) {
-    if (!file.exists(db_path) || !nzchar(trimws(stand_tbl))) return(character(0))
-    con <- dbConnect(SQLite(), db_path)
-    on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
-    if (!dbExistsTable(con, stand_tbl)) return(character(0))
-    dbListFields(con, stand_tbl)
-  }
-
-  get_unique_group_values <- function(db_path, stand_tbl, group_col) {
-    if (!file.exists(db_path) || !nzchar(trimws(stand_tbl)) || !nzchar(trimws(group_col))) return(character(0))
-    con <- dbConnect(SQLite(), db_path)
-    on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
-    if (!dbExistsTable(con, stand_tbl)) return(character(0))
-    table_cols <- dbListFields(con, stand_tbl)
-    if (!(group_col %in% table_cols)) return(character(0))
-    
-    sql <- sprintf(
-      "SELECT DISTINCT %s AS GROUP_VALUE FROM %s WHERE %s IS NOT NULL AND TRIM(CAST(%s AS TEXT)) != ''",
-      quote_sql_identifier(group_col),
-      quote_sql_identifier(stand_tbl),
-      quote_sql_identifier(group_col),
-      quote_sql_identifier(group_col)
-    )
-    values <- dbGetQuery(con, sql)$GROUP_VALUE
-    values <- trimws(as.character(values))
-    sort(unique(values[!is.na(values) & nzchar(values)]))
-  }
-
-  parse_groups_column_keys <- function(db_path, stand_tbl) {
-    if (!file.exists(db_path) || !nzchar(trimws(stand_tbl))) return(character(0))
-    con <- dbConnect(SQLite(), db_path)
-    on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
-    if (!dbExistsTable(con, stand_tbl)) return(character(0))
-    cols <- dbListFields(con, stand_tbl)
-    grp_col <- cols[toupper(cols) == "GROUPS"]
-    if (length(grp_col) == 0) return(character(0))
-    
-    sql <- sprintf("SELECT %s FROM %s WHERE %s IS NOT NULL AND TRIM(CAST(%s AS TEXT)) != ''",
-                   quote_sql_identifier(grp_col[1]), quote_sql_identifier(stand_tbl), 
-                   quote_sql_identifier(grp_col[1]), quote_sql_identifier(grp_col[1]))
-    vals <- dbGetQuery(con, sql)[[1]]
-    if (length(vals) == 0) return(character(0))
-    
-    parts <- unlist(strsplit(vals[!is.na(vals)], "\\s+"))
-    parts <- parts[nzchar(parts)]
-    keys <- sub("=.*$", "", parts)
-    
-    # Automatically filter out explicit "NA" standalone keys
-    keys <- keys[keys != "NA"]
-    
-    sort(unique(keys))
-  }
-
-  get_unique_group_values_parsed <- function(db_path, stand_tbl, parsed_key) {
-    if (!file.exists(db_path) || !nzchar(trimws(stand_tbl)) || !nzchar(trimws(parsed_key))) return(character(0))
-    con <- dbConnect(SQLite(), db_path)
-    on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
-    if (!dbExistsTable(con, stand_tbl)) return(character(0))
-    cols <- dbListFields(con, stand_tbl)
-    grp_col <- cols[toupper(cols) == "GROUPS"]
-    if (length(grp_col) == 0) return(character(0))
-    
-    sql <- sprintf("SELECT %s FROM %s WHERE %s IS NOT NULL AND TRIM(CAST(%s AS TEXT)) != ''",
-                   quote_sql_identifier(grp_col[1]), quote_sql_identifier(stand_tbl), 
-                   quote_sql_identifier(grp_col[1]), quote_sql_identifier(grp_col[1]))
-    vals <- dbGetQuery(con, sql)[[1]]
-    if (length(vals) == 0) return(character(0))
-    
-    all_vals <- unique(extract_group_values_vectorized(vals, parsed_key))
-    all_vals <- all_vals[!is.na(all_vals)]
-    sort(all_vals[nzchar(all_vals)])
-  }
-
-  # Connects to SQLite DB and retrieves unique group strings, ignoring 'excluded_groups'
-  get_groups_from_db <- function(db_path, table_name, group_col, excluded_groups, use_groups = FALSE) {
-    if (!file.exists(db_path)) return(character(0))
-    con <- dbConnect(SQLite(), db_path)
-    on.exit(dbDisconnect(con), add = TRUE) # Ensure we close the DB connection automatically 
-    
-    # Ensure the target table actually exists
-    if (!dbExistsTable(con, table_name)) {
-      stop(sprintf("Table '%s' could not be found in the database. Please check the 'Stand Initialization Table' name.", table_name))
-    }
-    
-    table_cols <- dbListFields(con, table_name)
-    
-    if (isTRUE(use_groups)) {
-      grp_col_candidates <- table_cols[toupper(table_cols) == "GROUPS"]
-      if (length(grp_col_candidates) == 0) {
-        stop(sprintf("Column 'GROUPS' could not be found in table '%s'.", table_name))
-      }
-      grp_col_name <- grp_col_candidates[1]
-      
-      sql <- sprintf("SELECT %s FROM %s WHERE %s IS NOT NULL AND TRIM(CAST(%s AS TEXT)) != ''",
-                     quote_sql_identifier(grp_col_name), quote_sql_identifier(table_name),
-                     quote_sql_identifier(grp_col_name), quote_sql_identifier(grp_col_name))
-      vals <- dbGetQuery(con, sql)[[1]]
-      if (length(vals) == 0) return(character(0))
-      
-      parsed_unique <- unique(extract_group_values_vectorized(vals, group_col))
-      groups <- as.character(parsed_unique[!is.na(parsed_unique)])
-    } else {
-      if (!(group_col %in% table_cols)) {
-        stop(sprintf("Column '%s' could not be found in the table '%s'. Please check the 'Database Grouping Column' name.", group_col, table_name))
-      }
-      sql <- sprintf("SELECT DISTINCT %s AS GROUP_CODE FROM %s", quote_sql_identifier(group_col), quote_sql_identifier(table_name))
-      groups <- dbGetQuery(con, sql)$GROUP_CODE
-      groups <- as.character(groups)
-    }
-  
-  # Filter out empty strings, NA, or user excluded groups (e.g. 'Riparian')
-  groups <- groups[!is.na(groups) & nzchar(trimws(groups))]
-  groups <- groups[!(tolower(groups) %in% tolower(excluded_groups))]
-  sort(unique(groups))
-}
 
 # Splits concatenated multiple string KCP entries inside a cell
 split_kcp_cell <- function(x) {
@@ -599,3 +294,155 @@ sys_cores <- parallel::detectCores()
 if (is.na(sys_cores)) sys_cores <- 1
 def_cores <- max(1, floor(sys_cores / 4))
 
+
+
+extract_group_values_vectorized <- function(vec, target_key) {
+  escaped_key <- gsub("([.|()\\\\^{}+$*?])", "\\\\\\1", target_key)
+  pat_eq <- sprintf("(?:^|\\s)%s=([^\\s]+)", escaped_key)
+  pat_alone <- sprintf("(?:^|\\s)(%s)(?:\\s|$)", escaped_key)
+  
+  m_alone <- regexpr(pat_alone, vec, perl=TRUE)
+  m_eq <- regexpr(pat_eq, vec, perl=TRUE)
+  
+  parsed_vals <- rep(NA_character_, length(vec))
+  parsed_vals[m_alone != -1] <- target_key
+  
+  idx_eq <- m_eq != -1
+  if (any(idx_eq)) {
+    starts <- attr(m_eq, "capture.start")[, 1]
+    lengths <- attr(m_eq, "capture.length")[, 1]
+    parsed_vals[idx_eq] <- substring(vec[idx_eq], starts[idx_eq], starts[idx_eq] + lengths[idx_eq] - 1)
+  }
+  
+  # Automatically remove explicit "NA" string values
+  parsed_vals[!is.na(parsed_vals) & toupper(trimws(parsed_vals)) %in% c("NA", "<NA>", "NULL", "NONE")] <- NA_character_
+  
+  return(parsed_vals)
+}
+
+# Connects to SQLite DB and retrieves unique group strings, ignoring 'excluded_groups'
+get_groups_from_db <- function(db_path, table_name, group_col, excluded_groups, use_groups = FALSE) {
+  if (!file.exists(db_path)) return(character(0))
+  con <- dbConnect(SQLite(), db_path)
+  on.exit(dbDisconnect(con), add = TRUE) # Ensure we close the DB connection automatically 
+  
+  # Ensure the target table actually exists
+  if (!dbExistsTable(con, table_name)) {
+    stop(sprintf("Table '%s' could not be found in the database. Please check the 'Stand Initialization Table' name.", table_name))
+  }
+  
+  table_cols <- dbListFields(con, table_name)
+  
+  if (isTRUE(use_groups)) {
+    grp_col_candidates <- table_cols[toupper(table_cols) == "GROUPS"]
+    if (length(grp_col_candidates) == 0) {
+      stop(sprintf("Column 'GROUPS' could not be found in table '%s'.", table_name))
+    }
+    grp_col_name <- grp_col_candidates[1]
+    
+    sql <- sprintf("SELECT %s FROM %s WHERE %s IS NOT NULL AND TRIM(CAST(%s AS TEXT)) != ''",
+                   quote_sql_identifier(grp_col_name), quote_sql_identifier(table_name),
+                   quote_sql_identifier(grp_col_name), quote_sql_identifier(grp_col_name))
+    vals <- dbGetQuery(con, sql)[[1]]
+    if (length(vals) == 0) return(character(0))
+    
+    parsed_unique <- unique(extract_group_values_vectorized(vals, group_col))
+    groups <- as.character(parsed_unique[!is.na(parsed_unique)])
+  } else {
+    if (!(group_col %in% table_cols)) {
+      stop(sprintf("Column '%s' could not be found in the table '%s'. Please check the 'Database Grouping Column' name.", group_col, table_name))
+    }
+    sql <- sprintf("SELECT DISTINCT %s AS GROUP_CODE FROM %s", quote_sql_identifier(group_col), quote_sql_identifier(table_name))
+    groups <- dbGetQuery(con, sql)$GROUP_CODE
+    groups <- as.character(groups)
+  }
+  
+  # Filter out empty strings, NA, or user excluded groups (e.g. 'Riparian')
+  groups <- groups[!is.na(groups) & nzchar(trimws(groups))]
+  groups <- groups[!(tolower(groups) %in% tolower(excluded_groups))]
+  sort(unique(groups))
+}
+
+
+  
+  normalize_excluded_groups <- function(values) {
+    if (is.null(values) || length(values) == 0) return(character(0))
+    if (length(values) == 1) {
+      values <- unlist(strsplit(values, "\\s*,\\s*"))
+    }
+    values <- trimws(as.character(values))
+    values[!is.na(values) & nzchar(values)]
+  }
+  
+  get_group_column_choices <- function(db_path, stand_tbl) {
+    if (!file.exists(db_path) || !nzchar(trimws(stand_tbl))) return(character(0))
+    con <- dbConnect(SQLite(), db_path)
+    on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
+    if (!dbExistsTable(con, stand_tbl)) return(character(0))
+    dbListFields(con, stand_tbl)
+  }
+  
+  get_unique_group_values <- function(db_path, stand_tbl, group_col) {
+    if (!file.exists(db_path) || !nzchar(trimws(stand_tbl)) || !nzchar(trimws(group_col))) return(character(0))
+    con <- dbConnect(SQLite(), db_path)
+    on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
+    if (!dbExistsTable(con, stand_tbl)) return(character(0))
+    table_cols <- dbListFields(con, stand_tbl)
+    if (!(group_col %in% table_cols)) return(character(0))
+    
+    sql <- sprintf(
+      "SELECT DISTINCT %s AS GROUP_VALUE FROM %s WHERE %s IS NOT NULL AND TRIM(CAST(%s AS TEXT)) != ''",
+      quote_sql_identifier(group_col),
+      quote_sql_identifier(stand_tbl),
+      quote_sql_identifier(group_col),
+      quote_sql_identifier(group_col)
+    )
+    values <- dbGetQuery(con, sql)$GROUP_VALUE
+    values <- trimws(as.character(values))
+    sort(unique(values[!is.na(values) & nzchar(values)]))
+  }
+  
+  parse_groups_column_keys <- function(db_path, stand_tbl) {
+    if (!file.exists(db_path) || !nzchar(trimws(stand_tbl))) return(character(0))
+    con <- dbConnect(SQLite(), db_path)
+    on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
+    if (!dbExistsTable(con, stand_tbl)) return(character(0))
+    cols <- dbListFields(con, stand_tbl)
+    grp_col <- cols[toupper(cols) == "GROUPS"]
+    if (length(grp_col) == 0) return(character(0))
+    
+    sql <- sprintf("SELECT %s FROM %s WHERE %s IS NOT NULL AND TRIM(CAST(%s AS TEXT)) != ''",
+                   quote_sql_identifier(grp_col[1]), quote_sql_identifier(stand_tbl), 
+                   quote_sql_identifier(grp_col[1]), quote_sql_identifier(grp_col[1]))
+    vals <- dbGetQuery(con, sql)[[1]]
+    if (length(vals) == 0) return(character(0))
+    
+    parts <- unlist(strsplit(vals[!is.na(vals)], "\\s+"))
+    parts <- parts[nzchar(parts)]
+    keys <- sub("=.*$", "", parts)
+    
+    # Automatically filter out explicit "NA" standalone keys
+    keys <- keys[keys != "NA"]
+    
+    sort(unique(keys))
+  }
+  
+  get_unique_group_values_parsed <- function(db_path, stand_tbl, parsed_key) {
+    if (!file.exists(db_path) || !nzchar(trimws(stand_tbl)) || !nzchar(trimws(parsed_key))) return(character(0))
+    con <- dbConnect(SQLite(), db_path)
+    on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
+    if (!dbExistsTable(con, stand_tbl)) return(character(0))
+    cols <- dbListFields(con, stand_tbl)
+    grp_col <- cols[toupper(cols) == "GROUPS"]
+    if (length(grp_col) == 0) return(character(0))
+    
+    sql <- sprintf("SELECT %s FROM %s WHERE %s IS NOT NULL AND TRIM(CAST(%s AS TEXT)) != ''",
+                   quote_sql_identifier(grp_col[1]), quote_sql_identifier(stand_tbl), 
+                   quote_sql_identifier(grp_col[1]), quote_sql_identifier(grp_col[1]))
+    vals <- dbGetQuery(con, sql)[[1]]
+    if (length(vals) == 0) return(character(0))
+    
+    all_vals <- unique(extract_group_values_vectorized(vals, parsed_key))
+    all_vals <- all_vals[!is.na(all_vals)]
+    sort(all_vals[nzchar(all_vals)])
+  }
