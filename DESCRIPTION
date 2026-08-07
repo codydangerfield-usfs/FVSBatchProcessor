@@ -10,9 +10,10 @@ License: MIT + file LICENSE
 Encoding: UTF-8
 LazyData: true
 Depends:
-    R (>= 4.2.0)
-Imports:
+    R (>= 4.2.0),
     shiny,
+    shinyjs
+Imports:
     bslib,
     RSQLite,
     rhandsontable,
@@ -21,8 +22,6 @@ Imports:
     doSNOW,
     uuid,
     zip,
-    shinyjs,
-    shinyFiles,
     dplyr,
     callr,
     DBI,

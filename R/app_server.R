@@ -19,39 +19,6 @@ server <- function(input, output, session) {
   prog_file_run <- tempfile(pattern = "run_", fileext = ".txt")
   prog_file_merge <- tempfile(pattern = "merge_", fileext = ".txt")
 
-  pick_directory <- function(default = ".", caption = "Select folder") {
-    default <- if (is.null(default) || !nzchar(default)) "." else default
-
-    if (.Platform$OS.type == "windows" && exists("choose.dir", where = asNamespace("utils"), mode = "function")) {
-      dir <- tryCatch(utils::choose.dir(default = default, caption = caption), error = function(e) NA_character_)
-      if (!is.na(dir) && nzchar(dir)) return(normalizePath(dir, winslash = "/", mustWork = FALSE))
-    }
-
-    if (requireNamespace("tcltk", quietly = TRUE)) {
-      dir <- tryCatch(tcltk::tk_choose.dir(default = default, caption = caption), error = function(e) NA_character_)
-      if (!is.na(dir) && nzchar(dir)) return(normalizePath(dir, winslash = "/", mustWork = FALSE))
-    }
-
-    NA_character_
-  }
-
-  pick_file <- function(default = ".", caption = "Select file") {
-    default <- if (is.null(default) || !nzchar(default)) "." else default
-
-    if (.Platform$OS.type == "windows" && exists("choose.files", where = asNamespace("utils"), mode = "function")) {
-      file_default <- if (dir.exists(default)) file.path(default, "*.*") else default
-      file <- tryCatch(utils::choose.files(default = file_default, caption = caption, multi = FALSE), error = function(e) character(0))
-      if (length(file) > 0 && !is.na(file[1]) && nzchar(file[1])) return(file[1])
-    }
-
-    if (exists("file.choose", where = asNamespace("base"), mode = "function")) {
-      file <- tryCatch(base::file.choose(), error = function(e) "")
-      if (nzchar(file)) return(file)
-    }
-
-    ""
-  }
-
   format_elapsed <- function(start_time) {
     if (is.null(start_time) || is.na(start_time)) return("N/A")
     secs <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
@@ -62,7 +29,30 @@ server <- function(input, output, session) {
     sprintf("%02d:%02d:%02d", hh, mm, ss)
   }
 
-  # Use the caller working directory (set in fvsRunBatch) as the runtime root.
+  terminate_bg_process <- function(proc) {
+    if (is.null(proc)) return(FALSE)
+
+    is_alive <- tryCatch(isTRUE(proc$is_alive()), error = function(e) FALSE)
+    if (!is_alive) return(FALSE)
+
+    killed <- tryCatch({
+      proc$kill_tree()
+      TRUE
+    }, error = function(e) FALSE)
+
+    if (!isTRUE(killed)) {
+      killed <- tryCatch({
+        proc$kill()
+        TRUE
+      }, error = function(e) FALSE)
+    }
+
+    isTRUE(killed)
+  }
+
+  # --- UI BUTTON BROWSER EVENT OBSERVERS ---
+
+  # Use the user's active session wd instead of the package directory.
   dynamic_wd <- getShinyOption("FVS_USER_WD", default = getwd())
 
   normalize_dir_input <- function(path, fallback = dynamic_wd) {
@@ -82,43 +72,32 @@ server <- function(input, output, session) {
     session$sendCustomMessage("set_master_db_label", list(value = safe_db))
   }
 
+  # Keep the visible fileInput label in sync whenever the hidden DB field changes,
+  # including initial auto-detection during app startup.
   observeEvent(input$master_db, {
     db_label <- trimws(as.character(input$master_db))
     session$onFlushed(function() {
       sync_master_db_upload_label(db_label)
     }, once = TRUE)
   }, ignoreInit = FALSE)
-  
-  # --- UI BUTTON BROWSER EVENT OBSERVERS ---
+
   observeEvent(input$browse_root, {
-    dir <- pick_directory(default = input$root_dir, caption = "Select Root Folder Path")
-    if (!is.na(dir) && nzchar(dir)) {
-      updateTextInput(session, "root_dir", value = normalizePath(dir, winslash = "/", mustWork = FALSE))
+    req(input$browse_root > 0)
+    default_root <- normalize_dir_input(input$root_dir, fallback = dynamic_wd)
+    selected_dir <- get_native_folder(default_path = default_root, caption_text = "Select Root Folder Path")
+    if (!is.null(selected_dir)) {
+      updateTextInput(session, "root_dir", value = normalizePath(selected_dir, winslash = "/", mustWork = FALSE))
     }
-  })
-  
-  observeEvent(input$browse_db, {
-    file <- pick_file(default = input$root_dir, caption = "Select Master Database File")
-    
-    if (length(file) > 0 && !is.na(file) && nzchar(file)) {
-      inputs_dir <- normalizePath(file.path(input$root_dir, "Inputs"), winslash = "/", mustWork = FALSE)
-      file_dir <- normalizePath(dirname(file), winslash = "/", mustWork = FALSE)
-      
-      if (inputs_dir == file_dir) {
-        updateTextInput(session, "master_db", value = basename(file))
-      } else {
-        updateTextInput(session, "master_db", value = normalizePath(file, winslash = "/", mustWork = FALSE))
-      }
-    }
-  })
-  
+  }, ignoreInit = TRUE)
+
   observeEvent(input$browse_kcp, {
-    default_path <- file.path(input$root_dir, "KCP_Catalog")
-    dir <- pick_directory(default = default_path, caption = "Select KCP Directory")
-    if (!is.na(dir) && nzchar(dir)) {
-      updateTextInput(session, "kcp_dir", value = normalizePath(dir, winslash = "/", mustWork = FALSE))
+    req(input$browse_kcp > 0)
+    default_path <- file.path(normalize_dir_input(input$root_dir, fallback = dynamic_wd), "KCP_Catalog")
+    selected_dir <- get_native_folder(default_path = default_path, caption_text = "Select KCP Directory")
+    if (!is.null(selected_dir)) {
+      updateTextInput(session, "kcp_dir", value = normalizePath(selected_dir, winslash = "/", mustWork = FALSE))
     }
-  })
+  }, ignoreInit = TRUE)
 
   observeEvent(input$master_db_upload, {
     file_info <- input$master_db_upload
@@ -141,7 +120,7 @@ server <- function(input, output, session) {
     sync_master_db_upload_label(db_name)
     showNotification(sprintf("Master database staged to %s", db_dest), type = "message")
   }, ignoreInit = TRUE)
-
+  
   find_input_dir <- function(root_dir) {
     top_dirs <- tryCatch(list.dirs(root_dir, full.names = TRUE, recursive = FALSE), error = function(e) character(0))
     if (length(top_dirs) == 0) return("")
@@ -178,27 +157,33 @@ server <- function(input, output, session) {
     )
     if (length(available_dbs) == 1) available_dbs[1] else "<FVS_Input.db>"
   }
-  
+
   resolve_db_path <- function(root_dir, db_name, slash = "/") {
     db_name <- trimws(db_name)
+
     if (!nzchar(db_name) || grepl("^<.*>$", db_name)) {
       db_name <- detect_single_db_name(root_dir)
     }
+
     if (grepl("^([A-Za-z]:|\\\\|/)", db_name)) {
       normalizePath(db_name, winslash = slash, mustWork = FALSE)
     } else {
       input_dir <- find_input_dir(root_dir)
-      if (!nzchar(input_dir)) input_dir <- normalizePath(file.path(root_dir, "Inputs"), winslash = "/", mustWork = FALSE)
+      if (!nzchar(input_dir)) {
+        input_dir <- normalizePath(file.path(root_dir, "Inputs"), winslash = "/", mustWork = FALSE)
+      }
       normalizePath(file.path(input_dir, db_name), winslash = slash, mustWork = FALSE)
     }
   }
   
   resolve_kcp_path <- function(root_dir, dir_name, slash = "/") {
     dir_name <- trimws(dir_name)
+
     if (!nzchar(dir_name) || identical(dir_name, "KCP_Catalog")) {
       detected_kcp <- find_kcp_dir(root_dir)
       if (nzchar(detected_kcp)) dir_name <- detected_kcp
     }
+
     if (grepl("^([A-Za-z]:|\\\\|/)", dir_name)) {
       normalizePath(dir_name, winslash = slash, mustWork = FALSE)
     } else {
@@ -206,11 +191,17 @@ server <- function(input, output, session) {
     }
   }
 
+  # Runtime defaults must be derived at launch (not package install time).
   derive_runtime_defaults <- function(project_root) {
     root <- normalizePath(project_root, winslash = "/", mustWork = FALSE)
+
+    top_dirs <- tryCatch(list.dirs(root, full.names = TRUE, recursive = FALSE), error = function(e) character(0))
+    top_dirs <- unique(normalizePath(top_dirs, winslash = "/", mustWork = FALSE))
+
     db_default <- detect_single_db_name(root)
     kcp_detected <- find_kcp_dir(root)
     kcp_default <- if (nzchar(kcp_detected)) kcp_detected else "KCP_Catalog"
+
     list(root = root, db = db_default, kcp = kcp_default)
   }
 
@@ -218,14 +209,17 @@ server <- function(input, output, session) {
 
   observe({
     if (isTRUE(defaults_initialized())) return()
-
+    
+    # Use FVS_USER_WD instead of getwd() to track where the script was launched from vs the package root
     caller_wd <- getShinyOption("FVS_USER_WD", default = getwd())
+    
     d <- derive_runtime_defaults(caller_wd)
     if (!nzchar(trimws(as.character(d$db)))) d$db <- "<FVS_Input.db>"
-
     updateTextInput(session, "root_dir", value = d$root)
     updateTextInput(session, "master_db", value = d$db)
     updateTextInput(session, "kcp_dir", value = d$kcp)
+
+    # Keep visible file input text synchronized with the detected DB.
     sync_master_db_upload_label(d$db)
     defaults_initialized(TRUE)
   })
@@ -234,13 +228,14 @@ server <- function(input, output, session) {
     runtime_root <- normalize_dir_input(input$root_dir, fallback = getShinyOption("FVS_USER_WD", default = getwd()))
     detected_db <- detect_single_db_name(runtime_root)
     if (!nzchar(trimws(as.character(detected_db)))) detected_db <- "<FVS_Input.db>"
+
     updateTextInput(session, "master_db", value = detected_db)
     sync_master_db_upload_label(detected_db)
   }, ignoreInit = TRUE)
   
   meta <- reactiveValues(groups = NULL, catalog = NULL, types = NULL)
   grid_data <- reactiveVal(data.frame())
-
+  
   observeEvent(c(input$master_db, input$root_dir), {
     req(input$master_db, input$root_dir)
     full_db_path <- resolve_db_path(input$root_dir, input$master_db)
@@ -317,34 +312,6 @@ server <- function(input, output, session) {
     retained_excluded <- current_excluded[current_excluded %in% group_values]
     updateSelectizeInput(session, "exclude_grps", choices = group_values, selected = retained_excluded, server = TRUE)
   }
-
-
-
-  
-  observeEvent(list(input$use_groups_col, input$master_db, input$root_dir, input$stand_tbl), {
-    refresh_grouping_controls()
-  }, ignoreInit = FALSE)
-
-  
-  observeEvent(input$group_col, {
-    req(input$master_db, input$root_dir, input$stand_tbl)
-    full_db_path <- resolve_db_path(input$root_dir, input$master_db)
-    if (!file.exists(full_db_path)) return()
-    
-    use_grp <- isTRUE(isolate(input$use_groups_col))
-    group_values <- tryCatch({
-      if (use_grp) {
-        get_unique_group_values_parsed(full_db_path, input$stand_tbl, input$group_col)
-      } else {
-        get_unique_group_values(full_db_path, input$stand_tbl, input$group_col)
-      }
-    }, error = function(e) character(0))
-    
-    current_excluded <- normalize_excluded_groups(isolate(input$exclude_grps))
-    retained_excluded <- current_excluded[current_excluded %in% group_values]
-    updateSelectizeInput(session, "exclude_grps", choices = group_values, selected = retained_excluded, server = TRUE)
-  }, ignoreInit = FALSE)
-
   
   observeEvent(input$stand_tbl, {
     req(input$master_db, input$root_dir, input$stand_tbl)
@@ -380,11 +347,32 @@ server <- function(input, output, session) {
             }
           }
         })
-
-
       }, error = function(e) {})
     }
-  })
+  }, ignoreInit = TRUE)
+  
+  observeEvent(list(input$use_groups_col, input$master_db, input$root_dir, input$stand_tbl), {
+    refresh_grouping_controls()
+  }, ignoreInit = FALSE)
+  
+  observeEvent(input$group_col, {
+    req(input$master_db, input$root_dir, input$stand_tbl)
+    full_db_path <- resolve_db_path(input$root_dir, input$master_db)
+    if (!file.exists(full_db_path)) return()
+    
+    use_grp <- isTRUE(isolate(input$use_groups_col))
+    group_values <- tryCatch({
+      if (use_grp) {
+        get_unique_group_values_parsed(full_db_path, input$stand_tbl, input$group_col)
+      } else {
+        get_unique_group_values(full_db_path, input$stand_tbl, input$group_col)
+      }
+    }, error = function(e) character(0))
+    
+    current_excluded <- normalize_excluded_groups(isolate(input$exclude_grps))
+    retained_excluded <- current_excluded[current_excluded %in% group_values]
+    updateSelectizeInput(session, "exclude_grps", choices = group_values, selected = retained_excluded, server = TRUE)
+  }, ignoreInit = FALSE)
   
   manifest_path <- reactive({
     req(input$root_dir)
@@ -433,11 +421,25 @@ server <- function(input, output, session) {
         has_var <- "VARIANT" %in% toupper(cols)
         var_str <- if (has_var) ", VARIANT" else ""
         
-        query <- sprintf("SELECT STAND_ID, STAND_CN, %s AS GROUP_CODE %s FROM %s", 
-                         quote_sql_identifier(input$group_col), var_str, quote_sql_identifier(input$stand_tbl))
-        res <- dbGetQuery(con, query)
-        attr(res, "has_var") <- has_var
-        res
+        if (isTRUE(isolate(input$use_groups_col))) {
+          grp_col <- cols[toupper(cols) == "GROUPS"]
+          if (length(grp_col) == 0) return(NULL)
+          query <- sprintf("SELECT STAND_ID, STAND_CN, %s AS GROUPS_RAW %s FROM %s", 
+                           quote_sql_identifier(grp_col[1]), var_str, quote_sql_identifier(input$stand_tbl))
+          res <- dbGetQuery(con, query)
+          target_key <- isolate(input$group_col)
+          
+          res$GROUP_CODE <- extract_group_values_vectorized(res$GROUPS_RAW, target_key)
+          res$GROUPS_RAW <- NULL
+          attr(res, "has_var") <- has_var
+          res
+        } else {
+          query <- sprintf("SELECT STAND_ID, STAND_CN, %s AS GROUP_CODE %s FROM %s", 
+                           quote_sql_identifier(input$group_col), var_str, quote_sql_identifier(input$stand_tbl))
+          res <- dbGetQuery(con, query)
+          attr(res, "has_var") <- has_var
+          res
+        }
       })
       
       if (is.null(stInitDF)) return(NULL)
@@ -449,7 +451,7 @@ server <- function(input, output, session) {
       }
       
       
-      ex_groups <- unlist(strsplit(input$exclude_grps, "\\s*,\\s*"))
+      ex_groups <- normalize_excluded_groups(input$exclude_grps)
       stInitDF <- subset(stInitDF, !is.na(GROUP_CODE) & nzchar(GROUP_CODE) & !(tolower(GROUP_CODE) %in% tolower(ex_groups)))
       
       manifest_df <- read.csv(m_file, stringsAsFactors = FALSE, colClasses = "character")
@@ -476,8 +478,27 @@ server <- function(input, output, session) {
   # Loads the available database context and dynamic KCP lookup combinations into a central reactive UI table
   observeEvent(input$load_metadata, {
     req(input$root_dir)
-    full_db_path <- resolve_db_path(input$root_dir, input$master_db)
-    full_kcp_dir <- resolve_kcp_path(input$root_dir, input$kcp_dir)
+
+    runtime_root <- normalizePath(trimws(input$root_dir), winslash = "/", mustWork = FALSE)
+    if (!nzchar(runtime_root)) runtime_root <- normalizePath(getShinyOption("FVS_USER_WD", default = getwd()), winslash = "/", mustWork = FALSE)
+
+    runtime_db <- trimws(as.character(input$master_db))
+    if (!nzchar(runtime_db) || grepl("^<.*>$", runtime_db)) {
+      runtime_db <- detect_single_db_name(runtime_root)
+      updateTextInput(session, "master_db", value = runtime_db)
+    }
+
+    runtime_kcp <- trimws(as.character(input$kcp_dir))
+    if (!nzchar(runtime_kcp) || identical(runtime_kcp, "KCP_Catalog")) {
+      detected_kcp <- find_kcp_dir(runtime_root)
+      if (nzchar(detected_kcp)) {
+        runtime_kcp <- detected_kcp
+        updateTextInput(session, "kcp_dir", value = runtime_kcp)
+      }
+    }
+
+    full_db_path <- resolve_db_path(runtime_root, runtime_db)
+    full_kcp_dir <- resolve_kcp_path(runtime_root, runtime_kcp)
     
     if (!file.exists(full_db_path)) {
       showNotification("Database target not found at specified Root directory path.", type = "error")
@@ -490,7 +511,7 @@ server <- function(input, output, session) {
     
     err_msg <- NULL
     withProgress(message = "Extracting file indexing mappings & building DB indexes...", value = 0.5, {
-      ex_groups <- unlist(strsplit(input$exclude_grps, "\\s*,\\s*"))
+      ex_groups <- normalize_excluded_groups(input$exclude_grps)
       tryCatch({
         local({
           con_m <- dbConnect(SQLite(), full_db_path)
@@ -510,7 +531,7 @@ server <- function(input, output, session) {
           }
         })
         
-        meta$groups <- get_groups_from_db(full_db_path, input$stand_tbl, input$group_col, ex_groups)
+        meta$groups <- get_groups_from_db(full_db_path, input$stand_tbl, input$group_col, ex_groups, isolate(input$use_groups_col))
         meta$catalog <- discover_kcp_catalog(full_kcp_dir)
       }, error = function(e) {
         err_msg <<- e$message
@@ -847,22 +868,20 @@ server <- function(input, output, session) {
   })
   
   # ----------------- PIPELINE STEP 1: PARALLEL KEYFILE GENERATION -----------------
-
   observeEvent(input$gen_keyfiles, {
     shinyjs::disable("gen_keyfiles")
-    shinyjs::show("kill_gen_btn")
     step_start_gen(Sys.time())
     
     job_queue <- get_job_queue()
     if (is.null(job_queue) || nrow(job_queue) == 0) {
       shinyjs::enable("gen_keyfiles")
-      shinyjs::hide("kill_gen_btn")
+      shinyjs::hide("kill_gen_btn_wrap")
       step_start_gen(NULL)
       showNotification("Pipeline Action Denied: No compiled project queue targets found.", type = "error")
       return()
     }
     
-    keyfile_db_path <- resolve_db_path(input$root_dir, input$master_db, slash = "\\\\")
+    keyfile_db_path <- resolve_db_path(input$root_dir, input$master_db, slash = "\\")
     p_inv_year   <- input$inv_year
     p_time_int   <- input$time_int
     p_num_cycles <- input$num_cycles
@@ -874,6 +893,8 @@ server <- function(input, output, session) {
     
     unique_scenarios <- unique(job_queue$Scenario)
     total_jobs <- nrow(job_queue)
+
+    shinyjs::show("kill_gen_btn_wrap")
     
     writeLines("0|Booting up compute cluster (this may take a moment)...", prog_file_gen)
     gen_prog <<- shiny::Progress$new(session, min=0, max=1)
@@ -968,7 +989,6 @@ server <- function(input, output, session) {
     
     bg_gen(p)
   })
-
   
   observe({
     p <- bg_gen()
@@ -976,6 +996,7 @@ server <- function(input, output, session) {
     invalidateLater(500, session)
     
     if (p$is_alive()) {
+      shinyjs::show("kill_gen_btn_wrap")
       if (file.exists(prog_file_gen)) {
         l <- suppressWarnings(readLines(prog_file_gen))
         if (length(l) > 0) {
@@ -993,7 +1014,7 @@ server <- function(input, output, session) {
       if (!is.null(gen_prog)) gen_prog$close()
       gen_prog <<- NULL
       shinyjs::enable("gen_keyfiles")
-      shinyjs::hide("kill_gen_btn")
+      shinyjs::hide("kill_gen_btn_wrap")
       updateActionButton(session, "kill_gen_btn", label = "Cancel", icon = icon("xmark"))
       
       if (p$get_exit_status() == 0) {
@@ -1015,14 +1036,14 @@ server <- function(input, output, session) {
   
   observeEvent(input$kill_gen_btn, priority=110, {
     p <- bg_gen()
-    if (!is.null(p) && p$is_alive()) {
-      p$kill_tree()
+    if (!is.null(p) && isTRUE(p$is_alive())) {
+      terminate_bg_process(p)
       bg_gen(NULL)
       if (!is.null(gen_prog)) gen_prog$close()
       gen_prog <<- NULL
       step_start_gen(NULL)
       shinyjs::enable("gen_keyfiles")
-      shinyjs::hide("kill_gen_btn")
+      shinyjs::hide("kill_gen_btn_wrap")
       updateActionButton(session, "kill_gen_btn", label = "Cancel", icon = icon("xmark"))
       showNotification("Keyfile generation cancelled by user.", type = "warning", duration = 5)
     }
@@ -1031,13 +1052,12 @@ server <- function(input, output, session) {
   # ----------------- PIPELINE STEP 2: PARALLEL rFVS ENGINE RUNS -----------------
   observeEvent(input$run_rfvs, {
     shinyjs::disable("run_rfvs")
-    shinyjs::show("kill_run_btn")
     step_start_run(Sys.time())
     
     job_queue <- get_job_queue()
     if (is.null(job_queue) || nrow(job_queue) == 0) {
       shinyjs::enable("run_rfvs")
-      shinyjs::hide("kill_run_btn")
+      shinyjs::hide("kill_run_btn_wrap")
       step_start_run(NULL)
       showNotification("Pipeline Action Denied: No execution targets map to the system queue.", type = "error")
       return()
@@ -1050,7 +1070,7 @@ server <- function(input, output, session) {
     
     if (!("VARIANT" %in% names(job_queue))) {
       shinyjs::enable("run_rfvs")
-      shinyjs::hide("kill_run_btn")
+      shinyjs::hide("kill_run_btn_wrap")
       step_start_run(NULL)
       showNotification("Pipeline Action Denied: VARIANT column not found in database. Cannot auto-detect variant.", type = "error")
       return()
@@ -1058,6 +1078,8 @@ server <- function(input, output, session) {
     
     p_overwrite <- input$overwrite_scens
     if (is.null(p_overwrite)) p_overwrite <- character(0)
+
+    shinyjs::show("kill_run_btn_wrap")
     
     writeLines("0|Booting up compute cluster (this may take a moment)...", prog_file_run)
     run_prog <<- shiny::Progress$new(session, min=0, max=1)
@@ -1168,6 +1190,7 @@ server <- function(input, output, session) {
     invalidateLater(500, session)
     
     if (p$is_alive()) {
+      shinyjs::show("kill_run_btn_wrap")
       if (file.exists(prog_file_run)) {
         l <- suppressWarnings(readLines(prog_file_run))
         if (length(l) > 0) {
@@ -1185,7 +1208,7 @@ server <- function(input, output, session) {
       if (!is.null(run_prog)) run_prog$close()
       run_prog <<- NULL
       shinyjs::enable("run_rfvs")
-      shinyjs::hide("kill_run_btn")
+      shinyjs::hide("kill_run_btn_wrap")
       updateActionButton(session, "kill_run_btn", label = "Cancel", icon = icon("xmark"))
       
       if (p$get_exit_status() == 0) {
@@ -1207,14 +1230,14 @@ server <- function(input, output, session) {
   
   observeEvent(input$kill_run_btn, priority=110, {
     p <- bg_run()
-    if (!is.null(p) && p$is_alive()) {
-      p$kill_tree()
+    if (!is.null(p) && isTRUE(p$is_alive())) {
+      terminate_bg_process(p)
       bg_run(NULL)
       if (!is.null(run_prog)) run_prog$close()
       run_prog <<- NULL
       step_start_run(NULL)
       shinyjs::enable("run_rfvs")
-      shinyjs::hide("kill_run_btn")
+      shinyjs::hide("kill_run_btn_wrap")
       updateActionButton(session, "kill_run_btn", label = "Cancel", icon = icon("xmark"))
       showNotification("rFVS execution cancelled by user.", type = "warning", duration = 5)
     }
@@ -1223,13 +1246,12 @@ server <- function(input, output, session) {
   # ----------------- PIPELINE STEP 3: CONSOLIDATE MASTER OUTPUTS -----------------
   observeEvent(input$merge_outputs, {
     shinyjs::disable("merge_outputs")
-    shinyjs::show("kill_merge_btn")
     step_start_merge(Sys.time())
     
     job_queue <- get_job_queue()
     if (is.null(job_queue) || nrow(job_queue) == 0) {
       shinyjs::enable("merge_outputs")
-      shinyjs::hide("kill_merge_btn")
+      shinyjs::hide("kill_merge_btn_wrap")
       step_start_merge(NULL)
       showNotification("Pipeline Action Denied: No execution targets map to the system queue.", type = "error")
       return()
@@ -1242,6 +1264,8 @@ server <- function(input, output, session) {
     total_combos  <- nrow(unique_combos)
     p_cores      <- input$num_cores_merge
     if (is.na(p_cores) || p_cores < 1) p_cores <- 1
+
+    shinyjs::show("kill_merge_btn_wrap")
     
     writeLines("0|Booting up compute cluster (this may take a moment)...", prog_file_merge)
     merge_prog <<- shiny::Progress$new(session, min=0, max=1)
@@ -1413,6 +1437,7 @@ server <- function(input, output, session) {
     invalidateLater(500, session)
     
     if (p$is_alive()) {
+      shinyjs::show("kill_merge_btn_wrap")
       if (file.exists(prog_file_merge)) {
         l <- suppressWarnings(readLines(prog_file_merge))
         if (length(l) > 0) {
@@ -1430,7 +1455,7 @@ server <- function(input, output, session) {
       if (!is.null(merge_prog)) merge_prog$close()
       merge_prog <<- NULL
       shinyjs::enable("merge_outputs")
-      shinyjs::hide("kill_merge_btn")
+      shinyjs::hide("kill_merge_btn_wrap")
       updateActionButton(session, "kill_merge_btn", label = "Cancel", icon = icon("xmark"))
       
       if (p$get_exit_status() == 0) {
@@ -1462,14 +1487,14 @@ server <- function(input, output, session) {
   
   observeEvent(input$kill_merge_btn, priority=110, {
     p <- bg_merge()
-    if (!is.null(p) && p$is_alive()) {
-      p$kill_tree()
+    if (!is.null(p) && isTRUE(p$is_alive())) {
+      terminate_bg_process(p)
       bg_merge(NULL)
       if (!is.null(merge_prog)) merge_prog$close()
       merge_prog <<- NULL
       step_start_merge(NULL)
       shinyjs::enable("merge_outputs")
-      shinyjs::hide("kill_merge_btn")
+      shinyjs::hide("kill_merge_btn_wrap")
       updateActionButton(session, "kill_merge_btn", label = "Cancel", icon = icon("xmark"))
       showNotification("Database consolidation cancelled by user.", type = "warning", duration = 5)
     }
