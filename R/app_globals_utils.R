@@ -2,6 +2,22 @@
 # 1. GLOBAL SETTINGS & UTILITIES
 # ------------------------------------------------------------------------------
 # Robust native OS folder picker wrapper
+#
+# Purpose:
+#   Opens a native directory picker for the host OS and returns a normalized
+#   path string for downstream file operations.
+#
+# Inputs:
+#   default_path : initial folder shown when dialog opens.
+#   caption_text : title/prompt text shown in the picker.
+#
+# Returns:
+#   Normalized folder path (with forward slashes) or NULL when canceled/failing.
+#
+# Platform behavior:
+#   Windows : PowerShell + embedded C# COM IFileOpenDialog.
+#   macOS   : AppleScript choose folder via osascript.
+#   Linux   : zenity directory picker, then tcltk fallback.
 get_native_folder <- function(default_path = "~", caption_text = "Select a Directory") {
   os <- Sys.info()[["sysname"]]
   path <- NULL
@@ -161,6 +177,13 @@ WorkflowImageFile <- "FVS_BatchProcessing_WorkflowDiagram.png"
 WorkflowResourcePrefix <- "workflow_assets"
 
 # Registers the workflow image directory for the Shiny UI.
+#
+# Purpose:
+#   Registers installed static assets (package www directory) under a stable
+#   Shiny URL prefix so UI code can reference the workflow diagram.
+#
+# Returns:
+#   TRUE when assets are available and registered; FALSE otherwise.
 register_workflow_assets <- function() {
   workflow_img_dir <- system.file("www", package = "FVSBatchProcessor")
   workflow_img_path <- file.path(workflow_img_dir, WorkflowImageFile)
@@ -179,17 +202,38 @@ register_workflow_assets <- function() {
 register_workflow_assets()
 
 # Helper function to remove leading numbers and special characters from a folder name
+#
+# Purpose:
+#   Converts ordered folder labels such as "01_Region" into clean type keys
+#   suitable for table columns and data-frame names.
 clean_kcp_type <- function(folder_name) {
   cleaned <- sub("^\\d+[_ -]*", "", folder_name)
   make.names(cleaned, unique = TRUE)
 }
 
 # Helper function to wrap identifiers in quotes safely for SQL syntax
+#
+# Purpose:
+#   Escapes embedded quotes and surrounds identifiers with double quotes.
+#   This avoids SQL issues with reserved words and special characters.
 quote_sql_identifier <- function(x) {
   paste0("\"", gsub("\"", "\"\"", x), "\"")
 }
 
 # Recursively scans the master KCP directory structure to build a catalog dataframe of all .kcp files
+#
+# Purpose:
+#   Creates a catalog of all first-level KCP type folders and their .kcp files.
+#
+# Input:
+#   master_dir : root folder containing one subfolder per KCP type.
+#
+# Returns:
+#   data.frame containing TypeOrder, KCP_Type, Folder, KCP_Name, KCP_Path;
+#   returns NULL when root/types are missing.
+#
+# Notes:
+#   Type folders with no .kcp files are still included with NA name/path rows.
 discover_kcp_catalog <- function(master_dir) {
   if (!dir.exists(master_dir)) return(NULL)
   type_dirs <- list.dirs(master_dir, full.names = TRUE, recursive = FALSE)
@@ -222,9 +266,14 @@ discover_kcp_catalog <- function(master_dir) {
   if (!is.null(catalog)) catalog[order(catalog$TypeOrder, catalog$KCP_Name), ] else NULL
 }
 
-
-
 # Splits concatenated multiple string KCP entries inside a cell
+#
+# Purpose:
+#   Parses user-entered multi-select KCP cell values using comma/semicolon/pipe
+#   delimiters, trims whitespace, and strips file extensions.
+#
+# Returns:
+#   Character vector of KCP names, or character(0) for empty input.
 split_kcp_cell <- function(x) {
   if (is.null(x) || is.na(x) || !nzchar(trimws(x))) return(character(0))
   values <- unlist(strsplit(as.character(x), "\\s*[;,|]\\s*", perl = TRUE))
@@ -234,6 +283,19 @@ split_kcp_cell <- function(x) {
 
 # Utility function that defines Scenario from GROUP_CODE plus either:
 # 1) user-selected columns, or 2) default Prescription-like column fallback.
+#
+# Purpose:
+#   Keeps Scenario values synchronized with grouping and selected metadata while
+#   preserving deliberate user edits when fields are unchanged.
+#
+# Inputs:
+#   df            : current lookup table.
+#   old_df        : prior lookup table snapshot for row-level change detection.
+#   scenario_cols : optional columns appended to GROUP_CODE in Scenario labels.
+#   force_auto    : when TRUE, regenerate all Scenario values from rules.
+#
+# Returns:
+#   Updated data frame with Scenario column applied.
 recalculate_scenarios <- function(df, old_df = NULL, scenario_cols = NULL, force_auto = FALSE) {
   if (nrow(df) == 0) return(df)
 
@@ -306,6 +368,16 @@ recalculate_scenarios <- function(df, old_df = NULL, scenario_cols = NULL, force
 }
 
 # Deep cleans exported xlsx files to remove legacy drawings that corrupt rhandsontable formatting/export functionality
+#
+# Purpose:
+#   Sanitizes exported xlsx files by removing stale drawing relationship XML
+#   entries that can break round-trips through spreadsheet tooling.
+#
+# Input:
+#   xlsx_path : workbook path to repair in place.
+#
+# Side effects:
+#   Unzips, mutates XML, and re-zips to the original file path.
 strip_missing_drawing_relationships <- function(xlsx_path) {
   tmp_dir <- tempfile("xlsx_clean_"); dir.create(tmp_dir); on.exit(unlink(tmp_dir, recursive = TRUE, force = TRUE), add = TRUE)
   unzip(xlsx_path, exdir = tmp_dir)
@@ -329,6 +401,18 @@ strip_missing_drawing_relationships <- function(xlsx_path) {
 }
 
 # Function to construct a formatted Excel workbook with predefined drop-down options for mapped KCP scenarios
+#
+# Purpose:
+#   Creates the user-facing lookup workbook with dropdown validations for KCP
+#   selections and formula-driven Scenario labels.
+#
+# Inputs:
+#   df_export     : lookup rows (GROUP_CODE and KCP type columns).
+#   meta_info     : metadata bundle with catalog, types, and groups.
+#   scenario_cols : optional columns included in Scenario suffix generation.
+#
+# Returns:
+#   An openxlsx workbook object containing Lookup and hidden Options sheets.
 create_lookup_wb <- function(df_export, meta_info, scenario_cols = NULL) {
   df_export$Scenario <- ""
   wb <- createWorkbook()
@@ -438,6 +522,12 @@ def_cores <- max(1, floor(sys_cores / 4))
 
 
 
+# Extracts values for a requested key from GROUPS-style text vectors.
+#
+# Behavior:
+#   - Matches both key=value tokens and standalone key tokens.
+#   - Returns a vector aligned to input rows.
+#   - Converts explicit NA-like strings (NA, <NA>, NULL, NONE) to NA.
 extract_group_values_vectorized <- function(vec, target_key) {
   escaped_key <- gsub("([.|()\\\\^{}+$*?])", "\\\\\\1", target_key)
   pat_eq <- sprintf("(?:^|\\s)%s=([^\\s]+)", escaped_key)
@@ -463,6 +553,20 @@ extract_group_values_vectorized <- function(vec, target_key) {
 }
 
 # Connects to SQLite DB and retrieves unique group strings, ignoring 'excluded_groups'
+#
+# Purpose:
+#   Retrieves available grouping values from SQLite using one of two modes:
+#   direct-column mode or parsed GROUPS-column mode.
+#
+# Inputs:
+#   db_path         : path to SQLite database.
+#   table_name      : stand initialization table name.
+#   group_col       : direct column name or GROUPS key name.
+#   excluded_groups : values to remove from returned groups.
+#   use_groups      : FALSE for direct-column mode; TRUE for GROUPS parsing mode.
+#
+# Returns:
+#   Sorted unique character vector of group values.
 get_groups_from_db <- function(db_path, table_name, group_col, excluded_groups, use_groups = FALSE) {
   if (!file.exists(db_path)) return(character(0))
   con <- dbConnect(SQLite(), db_path)
@@ -507,84 +611,125 @@ get_groups_from_db <- function(db_path, table_name, group_col, excluded_groups, 
 
 
   
-  normalize_excluded_groups <- function(values) {
-    if (is.null(values) || length(values) == 0) return(character(0))
-    if (length(values) == 1) {
-      values <- unlist(strsplit(values, "\\s*,\\s*"))
-    }
-    values <- trimws(as.character(values))
-    values[!is.na(values) & nzchar(values)]
+# Normalizes excluded-group inputs from text or multi-select controls.
+#
+# Input:
+#   values : character vector or comma-delimited single string.
+#
+# Returns:
+#   Cleaned character vector with whitespace removed and empties dropped.
+normalize_excluded_groups <- function(values) {
+  if (is.null(values) || length(values) == 0) return(character(0))
+  if (length(values) == 1) {
+    values <- unlist(strsplit(values, "\\s*,\\s*"))
   }
-  
-  get_group_column_choices <- function(db_path, stand_tbl) {
-    if (!file.exists(db_path) || !nzchar(trimws(stand_tbl))) return(character(0))
-    con <- dbConnect(SQLite(), db_path)
-    on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
-    if (!dbExistsTable(con, stand_tbl)) return(character(0))
-    dbListFields(con, stand_tbl)
-  }
-  
-  get_unique_group_values <- function(db_path, stand_tbl, group_col) {
-    if (!file.exists(db_path) || !nzchar(trimws(stand_tbl)) || !nzchar(trimws(group_col))) return(character(0))
-    con <- dbConnect(SQLite(), db_path)
-    on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
-    if (!dbExistsTable(con, stand_tbl)) return(character(0))
-    table_cols <- dbListFields(con, stand_tbl)
-    if (!(group_col %in% table_cols)) return(character(0))
-    
-    sql <- sprintf(
-      "SELECT DISTINCT %s AS GROUP_VALUE FROM %s WHERE %s IS NOT NULL AND TRIM(CAST(%s AS TEXT)) != ''",
-      quote_sql_identifier(group_col),
-      quote_sql_identifier(stand_tbl),
-      quote_sql_identifier(group_col),
-      quote_sql_identifier(group_col)
-    )
-    values <- dbGetQuery(con, sql)$GROUP_VALUE
-    values <- trimws(as.character(values))
-    sort(unique(values[!is.na(values) & nzchar(values)]))
-  }
-  
-  parse_groups_column_keys <- function(db_path, stand_tbl) {
-    if (!file.exists(db_path) || !nzchar(trimws(stand_tbl))) return(character(0))
-    con <- dbConnect(SQLite(), db_path)
-    on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
-    if (!dbExistsTable(con, stand_tbl)) return(character(0))
-    cols <- dbListFields(con, stand_tbl)
-    grp_col <- cols[toupper(cols) == "GROUPS"]
-    if (length(grp_col) == 0) return(character(0))
-    
-    sql <- sprintf("SELECT %s FROM %s WHERE %s IS NOT NULL AND TRIM(CAST(%s AS TEXT)) != ''",
-                   quote_sql_identifier(grp_col[1]), quote_sql_identifier(stand_tbl), 
-                   quote_sql_identifier(grp_col[1]), quote_sql_identifier(grp_col[1]))
-    vals <- dbGetQuery(con, sql)[[1]]
-    if (length(vals) == 0) return(character(0))
-    
-    parts <- unlist(strsplit(vals[!is.na(vals)], "\\s+"))
-    parts <- parts[nzchar(parts)]
-    keys <- sub("=.*$", "", parts)
-    
-    # Automatically filter out explicit "NA" standalone keys
-    keys <- keys[keys != "NA"]
-    
-    sort(unique(keys))
-  }
-  
-  get_unique_group_values_parsed <- function(db_path, stand_tbl, parsed_key) {
-    if (!file.exists(db_path) || !nzchar(trimws(stand_tbl)) || !nzchar(trimws(parsed_key))) return(character(0))
-    con <- dbConnect(SQLite(), db_path)
-    on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
-    if (!dbExistsTable(con, stand_tbl)) return(character(0))
-    cols <- dbListFields(con, stand_tbl)
-    grp_col <- cols[toupper(cols) == "GROUPS"]
-    if (length(grp_col) == 0) return(character(0))
-    
-    sql <- sprintf("SELECT %s FROM %s WHERE %s IS NOT NULL AND TRIM(CAST(%s AS TEXT)) != ''",
-                   quote_sql_identifier(grp_col[1]), quote_sql_identifier(stand_tbl), 
-                   quote_sql_identifier(grp_col[1]), quote_sql_identifier(grp_col[1]))
-    vals <- dbGetQuery(con, sql)[[1]]
-    if (length(vals) == 0) return(character(0))
-    
-    all_vals <- unique(extract_group_values_vectorized(vals, parsed_key))
-    all_vals <- all_vals[!is.na(all_vals)]
-    sort(all_vals[nzchar(all_vals)])
-  }
+  values <- trimws(as.character(values))
+  values[!is.na(values) & nzchar(values)]
+}
+
+# Returns available stand table columns for direct-column grouping mode.
+#
+# Inputs:
+#   db_path   : path to SQLite database.
+#   stand_tbl : stand initialization table name.
+#
+# Returns:
+#   Character vector of column names, or character(0) when unavailable.
+get_group_column_choices <- function(db_path, stand_tbl) {
+  if (!file.exists(db_path) || !nzchar(trimws(stand_tbl))) return(character(0))
+  con <- dbConnect(SQLite(), db_path)
+  on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
+  if (!dbExistsTable(con, stand_tbl)) return(character(0))
+  dbListFields(con, stand_tbl)
+}
+
+# Returns unique non-empty values from a selected direct grouping column.
+#
+# Inputs:
+#   db_path   : path to SQLite database.
+#   stand_tbl : stand initialization table name.
+#   group_col : grouping column name.
+#
+# Returns:
+#   Sorted unique values from the selected column.
+get_unique_group_values <- function(db_path, stand_tbl, group_col) {
+  if (!file.exists(db_path) || !nzchar(trimws(stand_tbl)) || !nzchar(trimws(group_col))) return(character(0))
+  con <- dbConnect(SQLite(), db_path)
+  on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
+  if (!dbExistsTable(con, stand_tbl)) return(character(0))
+  table_cols <- dbListFields(con, stand_tbl)
+  if (!(group_col %in% table_cols)) return(character(0))
+
+  sql <- sprintf(
+    "SELECT DISTINCT %s AS GROUP_VALUE FROM %s WHERE %s IS NOT NULL AND TRIM(CAST(%s AS TEXT)) != ''",
+    quote_sql_identifier(group_col),
+    quote_sql_identifier(stand_tbl),
+    quote_sql_identifier(group_col),
+    quote_sql_identifier(group_col)
+  )
+  values <- dbGetQuery(con, sql)$GROUP_VALUE
+  values <- trimws(as.character(values))
+  sort(unique(values[!is.na(values) & nzchar(values)]))
+}
+
+# Parses unique key names present in GROUPS text tokens across all rows.
+#
+# Inputs:
+#   db_path   : path to SQLite database.
+#   stand_tbl : stand initialization table name.
+#
+# Returns:
+#   Sorted unique GROUPS keys (left side of key=value tokens).
+parse_groups_column_keys <- function(db_path, stand_tbl) {
+  if (!file.exists(db_path) || !nzchar(trimws(stand_tbl))) return(character(0))
+  con <- dbConnect(SQLite(), db_path)
+  on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
+  if (!dbExistsTable(con, stand_tbl)) return(character(0))
+  cols <- dbListFields(con, stand_tbl)
+  grp_col <- cols[toupper(cols) == "GROUPS"]
+  if (length(grp_col) == 0) return(character(0))
+
+  sql <- sprintf("SELECT %s FROM %s WHERE %s IS NOT NULL AND TRIM(CAST(%s AS TEXT)) != ''",
+                 quote_sql_identifier(grp_col[1]), quote_sql_identifier(stand_tbl),
+                 quote_sql_identifier(grp_col[1]), quote_sql_identifier(grp_col[1]))
+  vals <- dbGetQuery(con, sql)[[1]]
+  if (length(vals) == 0) return(character(0))
+
+  parts <- unlist(strsplit(vals[!is.na(vals)], "\\s+"))
+  parts <- parts[nzchar(parts)]
+  keys <- sub("=.*$", "", parts)
+
+  # Automatically filter out explicit "NA" standalone keys.
+  keys <- keys[keys != "NA"]
+
+  sort(unique(keys))
+}
+
+# Returns unique values for one parsed GROUPS key.
+#
+# Inputs:
+#   db_path    : path to SQLite database.
+#   stand_tbl  : stand initialization table name.
+#   parsed_key : GROUPS key to extract values for.
+#
+# Returns:
+#   Sorted unique values associated with parsed_key.
+get_unique_group_values_parsed <- function(db_path, stand_tbl, parsed_key) {
+  if (!file.exists(db_path) || !nzchar(trimws(stand_tbl)) || !nzchar(trimws(parsed_key))) return(character(0))
+  con <- dbConnect(SQLite(), db_path)
+  on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
+  if (!dbExistsTable(con, stand_tbl)) return(character(0))
+  cols <- dbListFields(con, stand_tbl)
+  grp_col <- cols[toupper(cols) == "GROUPS"]
+  if (length(grp_col) == 0) return(character(0))
+
+  sql <- sprintf("SELECT %s FROM %s WHERE %s IS NOT NULL AND TRIM(CAST(%s AS TEXT)) != ''",
+                 quote_sql_identifier(grp_col[1]), quote_sql_identifier(stand_tbl),
+                 quote_sql_identifier(grp_col[1]), quote_sql_identifier(grp_col[1]))
+  vals <- dbGetQuery(con, sql)[[1]]
+  if (length(vals) == 0) return(character(0))
+
+  all_vals <- unique(extract_group_values_vectorized(vals, parsed_key))
+  all_vals <- all_vals[!is.na(all_vals)]
+  sort(all_vals[nzchar(all_vals)])
+}
