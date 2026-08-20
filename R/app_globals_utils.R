@@ -156,12 +156,6 @@ get_native_folder <- function(default_path = "~", caption_text = "Select a Direc
 # Increase maximum upload size to 10GB for very large database/file transfers
 options(shiny.maxRequestSize = 10000 * 1024^2)
 
-# Determine root directory
-RootDir <- normalizePath(getwd(), winslash = "/", mustWork = FALSE)
-# Define where simulation runs will be hosted
-RunBaseDir <- file.path(RootDir, "rFVS_Runs")
-# Set path for the KCP combinations manifest file
-ManifestFile <- file.path(RunBaseDir, "KCP_AddFile_Manifest.csv")
 # Set a visual icon/workflow diagram image name
 WorkflowImageFile <- "FVS_BatchProcessing_WorkflowDiagram.png"
 WorkflowResourcePrefix <- "workflow_assets"
@@ -169,39 +163,20 @@ WorkflowResourcePrefix <- "workflow_assets"
 # Registers the workflow image directory for the Shiny UI.
 register_workflow_assets <- function() {
   workflow_img_dir <- system.file("www", package = "FVSBatchProcessor")
-  if (!nzchar(workflow_img_dir)) return(FALSE)
-
   workflow_img_path <- file.path(workflow_img_dir, WorkflowImageFile)
-  if (!file.exists(workflow_img_path)) return(FALSE)
 
-  normalized_dir <- normalizePath(workflow_img_dir, winslash = "/", mustWork = TRUE)
-  current_paths <- shiny::resourcePaths()
-
-  if (!WorkflowResourcePrefix %in% names(current_paths)) {
-    shiny::addResourcePath(WorkflowResourcePrefix, normalized_dir)
-    return(TRUE)
+  if (!nzchar(workflow_img_dir) || !file.exists(workflow_img_path)) {
+    return(FALSE)
   }
 
-  identical(
-    normalizePath(current_paths[[WorkflowResourcePrefix]], winslash = "/", mustWork = FALSE),
-    normalized_dir
+  shiny::addResourcePath(
+    WorkflowResourcePrefix,
+    normalizePath(workflow_img_dir, winslash = "/", mustWork = TRUE)
   )
+
+  TRUE
 }
-
 register_workflow_assets()
-
-# Determine default master database file based on contents of Inputs folder
-InputsDir <- file.path(RootDir, "Inputs")
-available_dbs <- list.files(InputsDir, pattern = "\\.(db|sqlite)$", ignore.case = TRUE, full.names = FALSE)
-DefaultDB <- if (length(available_dbs) > 0) available_dbs[1] else "AllBKNF_Combined.db"
-
-# Determine default KCP directory based on contents of RootDir
-available_dirs <- list.dirs(RootDir, full.names = FALSE, recursive = FALSE)
-kcp_matches <- available_dirs[grepl("KCP", available_dirs, ignore.case = TRUE)]
-DefaultKCP <- if (length(kcp_matches) > 0) kcp_matches[1] else "KCP_Catalog"
-
-# Ensure the base directory for runs exists
-if (!dir.exists(RunBaseDir)) dir.create(RunBaseDir, recursive = TRUE, showWarnings = FALSE)
 
 # Helper function to remove leading numbers and special characters from a folder name
 clean_kcp_type <- function(folder_name) {
