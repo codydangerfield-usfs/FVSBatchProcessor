@@ -1,6 +1,4 @@
-﻿# Auto-generated from rFVS_BatchProcessor_rShiny_v2.R
-# Split for package structure on 2026-07-29 11:06:54
-
+﻿
 # 1. GLOBAL SETTINGS & UTILITIES
 # ------------------------------------------------------------------------------
 # Robust native OS folder picker wrapper
@@ -158,8 +156,8 @@ get_native_folder <- function(default_path = "~", caption_text = "Select a Direc
 # Increase maximum upload size to 10GB for very large database/file transfers
 options(shiny.maxRequestSize = 10000 * 1024^2)
 
-# Determine root directory, usually one level up from this script's working dir
-RootDir <- normalizePath(dirname(getwd()), winslash = "/", mustWork = FALSE)
+# Determine root directory
+RootDir <- normalizePath(getwd(), winslash = "/", mustWork = FALSE)
 # Define where simulation runs will be hosted
 RunBaseDir <- file.path(RootDir, "rFVS_Runs")
 # Set path for the KCP combinations manifest file
