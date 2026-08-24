@@ -188,22 +188,6 @@ register_workflow_assets <- function() {
   workflow_img_dir <- system.file("www", package = "FVSBatchProcessor")
   workflow_img_path <- file.path(workflow_img_dir, WorkflowImageFile)
   
-  # Fallback mechanism if package is not installed (e.g. running standalone script)
-  if (!nzchar(workflow_img_dir) || !file.exists(workflow_img_path)) {
-    possible_dirs <- c(
-      file.path(getwd(), "www"),
-      file.path(dirname(getwd()), "www"),
-      file.path(getwd(), "Scripts", "www"),
-      file.path(dirname(getwd()), "Scripts", "www")
-    )
-    
-    valid_dirs <- possible_dirs[file.exists(file.path(possible_dirs, WorkflowImageFile))]
-    if (length(valid_dirs) > 0) {
-      workflow_img_dir <- valid_dirs[1]
-      workflow_img_path <- file.path(workflow_img_dir, WorkflowImageFile)
-    }
-  }
-  
   if (!nzchar(workflow_img_dir) || !file.exists(workflow_img_path)) {
     return(FALSE)
   }
