@@ -149,14 +149,16 @@ ui <- function(request) {
             tags$ol(
               style = "padding-left: 15px; margin-bottom: 8px;",
               tags$li(strong("Direct Column (Default): "), "Select a standard column from the Stand Initialization table. All unique values become your groups."),
-              tags$li(strong("Use GROUPS Column: "), "Parse the standard FVS ", code("GROUPS"), " independent groups:")
+              tags$li(strong("Use GROUPS Column: "), "Parse the standard FVS ", code("GROUPS"), " into independent groups:")
             ),
             tags$ul(
               style = "padding-left: 20px; font-size: 0.95em;",
               tags$li("Parsed values, e.g., ", code("All_Stands"), ", without an equal sign are unique stand-alone groups."),
               tags$li("Parsed values with an equal sign (e.g., ", code("ForestType=Pine"), ") use the left side as the grouping column and the right side as the unique group value."),
               tags$li("Stands with empty or explicit null values (e.g., ", code("NA"), ") for a category are ignored.")
-            )
+            ),
+            p(strong("Creating New Combined Groups:")),
+            p("If you would like to stratify your stand table across multiple columns, you can create a new Grouping Column via the collapsed ", strong("Create New Grouping Column"), " panel to dynamically merge two or more Direct Columns or parsed GROUPS entries. This will securely create a new derived column in the database specifically structured for use in this dropdown.")
           )
         ),
 
