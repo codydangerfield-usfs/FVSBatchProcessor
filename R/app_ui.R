@@ -74,45 +74,12 @@ ui <- function(request) {
           ptext.innerHTML = message.detail;
         }
       });
-
-      Shiny.addCustomMessageHandler('set_master_db_label', function(message) {
-        const dbValue = (message && message.value) ? String(message.value) : '<FVS_Input.db>';
-
-        function applyLabel() {
-          const root = document.getElementById('master_db_upload');
-          if (!root) return false;
-
-          const scope = root.closest('.shiny-input-container') || root.parentElement || document;
-          let txt = scope.querySelector('input.form-control[type=\"text\"][readonly], input[type=\"text\"][readonly]');
-
-          if (!txt && root.querySelector) {
-            txt = root.querySelector('input.form-control[type=\"text\"][readonly], input[type=\"text\"][readonly]');
-          }
-
-          if (!txt) return false;
-
-          txt.value = dbValue;
-          txt.placeholder = dbValue;
-          txt.dispatchEvent(new Event('input', { bubbles: true }));
-          txt.dispatchEvent(new Event('change', { bubbles: true }));
-
-          if (window.jQuery) {
-            const jq = window.jQuery(txt);
-            jq.val(dbValue);
-            jq.attr('placeholder', dbValue);
-            jq.trigger('input');
-            jq.trigger('change');
-          }
-
-          return true;
+      
+      // Update HTML title attribute on hover so truncated text shows up in a standard OS tooltip
+      $(document).on('mouseover', '#root_dir, #master_db, #kcp_dir', function() {
+        if ($(this).val()) {
+          $(this).attr('title', $(this).val());
         }
-
-        let attempts = 0;
-        (function retry() {
-          if (applyLabel()) return;
-          attempts += 1;
-          if (attempts < 50) setTimeout(retry, 100);
-        })();
       });
     "))
   ),
@@ -133,7 +100,7 @@ ui <- function(request) {
       ),
       conditionalPanel(
         condition = "input.main_tabs == 'tab1'",
-        h5("Execution Settings"),
+        h5("Global Parameters"),
         
         tags$label("Root Folder Path", class = "form-label", `for` = "root_dir"),
         div(class = "input-group mb-3",
@@ -147,9 +114,17 @@ ui <- function(request) {
             )
         ),
         
-        tags$label("Master Database File", class = "form-label", `for` = "master_db_upload"),
-        fileInput("master_db_upload", NULL, accept = c(".db", ".sqlite"), buttonLabel = "Browse...", placeholder = "<FVS_Input.db>", width = "100%"),
-        div(style = "display:none;", textInput("master_db", label = NULL, value = "")),
+        tags$label("Master Database File", class = "form-label", `for` = "master_db"),
+        div(class = "input-group mb-3",
+            actionButton("browse_db", "Browse..."),
+            tags$input(
+              id = "master_db",
+              type = "text",
+              class = "form-control",
+              value = "",
+              placeholder = "<FVS_Input.db>"
+            )
+        ),
         
         tags$label("KCP Directory Name", class = "form-label", `for` = "kcp_dir"),
         div(class = "input-group mb-3",
@@ -164,10 +139,32 @@ ui <- function(request) {
         ),
         hr(),
         textInput("stand_tbl", "Stand Initialization Table", value = "FVS_STANDINIT"),
+
+        tags$details(
+          style = "margin-top: 10px; margin-bottom: 15px; font-size: 0.9em; color: #555;",
+          tags$summary(strong("ℹ️ How Grouping Works"), style = "cursor: pointer;"),
+          tags$div(
+            style = "margin-top: 10px; padding-left: 12px; border-left: 3px solid #18BC9C;",
+            p("Organize your FVS runs in two ways:"),
+            tags$ol(
+              style = "padding-left: 15px; margin-bottom: 8px;",
+              tags$li(strong("Direct Column (Default): "), "Select a standard column from the Stand Initialization table. All unique values become your groups."),
+              tags$li(strong("Use GROUPS Column: "), "Parse the standard FVS ", code("GROUPS"), " independent groups:")
+            ),
+            tags$ul(
+              style = "padding-left: 20px; font-size: 0.95em;",
+              tags$li("Parsed values, e.g., ", code("All_Stands"), ", without an equal sign are unique stand-alone groups."),
+              tags$li("Parsed values with an equal sign (e.g., ", code("ForestType=Pine"), ") use the left side as the grouping column and the right side as the unique group value."),
+              tags$li("Stands with empty or explicit null values (e.g., ", code("NA"), ") for a category are ignored.")
+            )
+          )
+        ),
+
         checkboxInput("use_groups_col", "Use GROUPS", value = FALSE),
         selectInput("group_col", "Database Grouping Column", choices = "VARIANT", selected = "VARIANT"),
         selectizeInput("exclude_grps", "Excluded Groups", choices = NULL, selected = NULL, multiple = TRUE,
                        options = list(placeholder = "Select group values to exclude")),
+
         hr(),
         actionButton("load_metadata", "Scan Directories & Connect DB", class = "btn-primary w-100"),
         div(style = "height: 8rem;")
@@ -176,7 +173,18 @@ ui <- function(request) {
         condition = "input.main_tabs == 'tab2'",
         h5("KCP Lookup Table"),
         p("Create specific KCP combinations that will define your FVS runs. You can do this by editing the grid directly or export the excel file for further editing and reupload to define your Group/Prescription combinations."),
+        tags$details(
+          style = "margin-top: 10px; margin-bottom: 15px; font-size: 0.9em; color: #555;",
+          tags$summary(strong("ℹ️ How Scenario Naming Works"), style = "cursor: pointer;"),
+          tags$div(
+            style = "margin-top: 10px; padding-left: 12px; border-left: 3px solid #18BC9C;",
+            p("The default programmatic naming scheme assumes you have a KCP folder like 'Prescriptions', where the Scenario becomes ", code("GROUP_CODE + Prescription"), ". However, you can specify any KCP folder to construct this name using the 'Scenario Columns' dropdown below, or it will default to ", code("GROUP_CODE + _NG"), " if no additional columns are specified."),
+            p("These Scenario names can also be manually edited in the grid, but it is highly recommended to use a programmatic naming scheme so your runs remain correctly outlined and organized.")
+          )
+        ),
         selectInput("scenario_add_cols", "Scenario Columns (In Addition To GROUP_CODE)", choices = NULL, multiple = TRUE),
+        hr(),
+        actionButton("btn_expand_modal", " Auto-Populate Combinations", icon = icon("wand-magic-sparkles"), class = "btn-info w-100 mb-2"),
         downloadButton("download_excel", "Export Matrix to Excel", class = "btn-outline-primary w-100 mb-2"),
         fileInput("upload_excel", "Import Excel Matrix File", accept = c(".xlsx", ".xls", ".csv"), buttonLabel = "Browse..."),
         hr(),
@@ -238,14 +246,41 @@ ui <- function(request) {
             icon = icon("circle-info"),
             card(
               card_header("Pipeline Overview"),
-              p("This application streamlines the process of linking a FVS-ready SQLite database with keyword components (KCPs) and executing them in parallel through the Forest Vegetation Simulator (rFVS)."),
+              p("This application streamlines the process of linking a FVS-ready SQLite database with keyword component files (KCPs) and executing them in parallel through the Forest Vegetation Simulator (rFVS)."),
               h5("Workflow Summary:"),
-              tags$ul(
-                tags$li(strong("Link Input Database:"), " Connect to your FVS-ready SQLite database."),
-                tags$li(strong("Define Scenarios:"), " Specify a grouping column to organize stands for each FVS run."),
-                tags$li(strong("Configure Runs:"), " Create a KCP lookup table to generate Group/Prescription specific scenarios using the interactive interface or by downloading, editing, and uploading the mapped Excel spreadsheet given the user's KCPs."),
-                tags$li(strong("Create Keyfiles:"), " Generate standalone FVS .key configuration files with all specified scenarios on a per-stand basis, natively staged for parallel processing."),
-                tags$li(strong("Execute & Consolidate:"), " Run rFVS instances concurrently across user-specified compute cores, merging all final database results on a Group/Prescription basis. ", strong("Note:"), " The system tracks previously completed runs. If you add new scenarios to an existing project, only the new un-simulated scenarios will be run, saving processing time. To rerun an already executed scenario, you must explicitly specify it in the 'Force Overwrite Specific Scenarios' dropdown on Tab 4.")
+              tags$ol(
+                tags$li(
+                  strong("Global Parameters"),
+                  tags$ul(
+                    tags$li("Link Input Database: Connect to your FVS-ready SQLite database."),
+                    tags$li("Define Groups: Specify a grouping column to organize stands for each FVS run.")
+                  )
+                ),
+                tags$li(
+                  strong("KCP Lookup Table"),
+                  tags$ul(
+                    tags$li("Configure Runs: Create a KCP lookup table to generate Group/Prescription-specific scenarios using the interactive interface or by downloading, editing, and uploading the mapped Excel spreadsheet based on your KCPs.")
+                  )
+                ),
+                tags$li(
+                  strong("Create Keyfiles"),
+                  tags$ul(
+                    tags$li("Create Keyfiles: Generate standalone FVS .key configuration files with all specified scenarios on a per-stand basis, natively staged for parallel processing.")
+                  )
+                ),
+                tags$li(
+                  strong("Run rFVS Engine"),
+                  tags$ul(
+                    tags$li("Execute Scenarios: Run rFVS instances concurrently across user-specified compute cores."),
+                    tags$li(strong("Note:"), " The system tracks previously completed runs. If you add new scenarios to an existing project, only new un-simulated scenarios will be run, saving processing time. To rerun an already executed scenario, explicitly specify it in the 'Force Overwrite Specific Scenarios' dropdown on Tab 4.")
+                  )
+                ),
+                tags$li(
+                  strong("Consolidate Outputs"),
+                  tags$ul(
+                    tags$li("Consolidate Results: Once all scenarios are configured and executed, consolidate stand-level outputs into scenario-specific databases (one per unique Group/Prescription run), then merge those into a single master database.")
+                  )
+                )
               ),
               hr(),
               h5("KCP Folder Organization:"),
@@ -253,11 +288,13 @@ ui <- function(request) {
               p("Importantly, the alphabetical/numerical order of these subfolders dictates the sequence in which the KCP files are appended and read by FVS. We strongly recommend using numbered prefixes (e.g., ", code("01_Global"), ", ", code("02_Calibration"), ", ", code("03_Prescriptions"), ", ", code("04_Outputs"), ") to explicitly control this load order. Ensure your output-generating KCP folder is specified last (numbered highest) so its instructions are executed after all other parameters."),
               hr(),
               h5("Folder Structure & Expected Locations:"),
-              p("Below is the recommended folder structure for organizing your project and running the FVS Batch Processor. The system generally expects your master database and KCP files to be located under your specified ", strong("Root Folder Path"), " as shown below e.g.,", code("FVS_BatchProcessing"), ". During execution, it builds standalone ", code("run.key"), " files per stand, executes them to dump temporary ", code(".out"), " and ", code(".db"), " files locally, and finally aggregates them into centralized merged output databases. While this structure is the default recommendation, users can specify custom distinct pathways using the overrides in Step 1."),
+              p("Below is the recommended folder structure for organizing your project and running the FVS Batch Processor."),
+              p("In this workflow, your R working directory becomes the project root and is used as the ", strong("Root Folder Path"), " (e.g., ", code("FVS_BatchProcessing"), ")."),
+              p("Inside that folder, the app expects an ", code("Inputs"), " folder with a single input database and a folder with ", code("KCP"), " in its name (for example, ", code("KCP_Catalog"), "). If the FVS project directory is setup this way, the app auto-detects both the input database and KCP catalog. During processing, ", code("rFVS_Runs"), " and ", code("Outputs"), " are created automatically. ", code("rFVS_Runs"), " stores individual stand-level run outputs per scenario, and ", code("Outputs"), " stores consolidated scenario databases plus the final master database."),
               pre("FVS_BatchProcessing
 \u251C\u2500\u2500 Inputs
 \u2502   \u2514\u2500\u2500 AllBKNF_Combined.db
-\u251C\u2500\u2500 KCPs
+\u251C\u2500\u2500 KCP_Catalog
 \u2502   \u251C\u2500\u2500 01_Global
 \u2502   \u2502   \u2514\u2500\u2500 Global_rFVS.kcp
 \u2502   \u251C\u2500\u2500 02_Calibration
@@ -313,10 +350,40 @@ ui <- function(request) {
             title = "1. Global Parameters",
             value = "tab1",
             icon = icon("sliders"),
-            card(
-              card_header("System Metadata Connection Output Summary"),
-              verbatimTextOutput("meta_status")
-              
+            tags$div(
+              class = "d-flex flex-column", style = "min-height: calc(100vh - 160px);", # Use exact viewport height math
+              card(
+                fill = FALSE,
+                card_header("System Metadata Connection Output Summary"),
+                verbatimTextOutput("meta_status")
+              ),
+              accordion(
+                open = FALSE,
+                class = "flex-grow-1 overflow-visible", # Claim all remaining space and allow dropdowns to overlap
+                accordion_panel(
+                  "Create New Grouping Column (Optional)",
+                  class = "overflow-visible d-flex flex-column", # Ensure the panel body allows flex layout to pin the button
+                  p("Select multiple database columns or parsed GROUP entries to concatenate into a single, combined column (e.g., ", code("ColumnA_ColumnB"), "). The new derived column will be appended to the Stand Initialization table for selection in the main Grouping Column dropdown on the left."),
+                  fluidRow(
+                    column(12,
+                           radioButtons("merge_col_mode", "Merge Mode:",
+                                        choices = c("Merge Direct Database Columns" = "cols", "Merge Parsed GROUP Entries" = "groups"),
+                                        inline = TRUE)
+                    )
+                  ),
+                  conditionalPanel(
+                    condition = "input.merge_col_mode == 'cols'",
+                    selectizeInput("merge_cols_select", "Select Columns to Merge:", choices = NULL, multiple = TRUE, options = list(placeholder = "Select 2 or more columns"))
+                  ),
+                  conditionalPanel(
+                    condition = "input.merge_col_mode == 'groups'",
+                    selectizeInput("merge_groups_select", "Select GROUP Entries to Merge:", choices = NULL, multiple = TRUE, options = list(placeholder = "Select 2 or more GROUPS"))
+                  ),
+                  div(class = "mt-auto pt-3 border-top", # Emulate a card footer pinned to the bottom
+                    actionButton("btn_create_merged_col", "Create Merged Column", icon = icon("layer-group"), class = "btn-secondary")
+                  )
+                )
+              )
             )
           ),
           nav_panel(
@@ -326,7 +393,7 @@ ui <- function(request) {
             card(
               card_header("Editable Scenario Definitions Matrix"),
               p(em("Note: Changes made inside the grid synchronize automatically. You can right-click rows to expand/delete elements.")),
-              p(strong("Reminder: "), "The columns below are dynamically built based on your KCP subfolders. The numerical/alphabetical order of those root folders dictates how those KCPs are stacked together for the simulation. If a Prescription is not specified, ", code("GROUP_CODE + _NG"), " will be used to specify the Scenario."),
+              p(strong("Reminder: "), "The columns below are dynamically built based on your KCP subfolders. The numerical/alphabetical order of those root folders dictates how those KCPs are stacked together for the simulation. For each KCP subfolder, you can select ", code("ALL"), " in the drop down, this option will stack all of the kcps in that folder together. If you want to generate a run for each kcp in the folder, use the auto-populate combinations button to select the ", code("GROUP_CODE"), " and subfolder at which you'd like to generate all combinations. ", strong("Importantly, each distinct FVS run is predicated on its unique Scenario name. Duplicate scenario names are not allowed.")),
               rHandsontableOutput("prescription_table", height = "600px")
               
             )

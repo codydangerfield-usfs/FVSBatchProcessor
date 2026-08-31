@@ -48,6 +48,31 @@
   }
 
   # --- UI BUTTON BROWSER EVENT OBSERVERS ---
+  
+  # Sync compute cores across tabs so changing one updates the others
+  observeEvent(input$num_cores, {
+    val <- input$num_cores
+    if (!is.null(val) && !is.na(val)) {
+      if (!identical(val, isolate(input$num_cores_rfvs))) updateNumericInput(session, "num_cores_rfvs", value = val)
+      if (!identical(val, isolate(input$num_cores_merge))) updateNumericInput(session, "num_cores_merge", value = val)
+    }
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$num_cores_rfvs, {
+    val <- input$num_cores_rfvs
+    if (!is.null(val) && !is.na(val)) {
+      if (!identical(val, isolate(input$num_cores))) updateNumericInput(session, "num_cores", value = val)
+      if (!identical(val, isolate(input$num_cores_merge))) updateNumericInput(session, "num_cores_merge", value = val)
+    }
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$num_cores_merge, {
+    val <- input$num_cores_merge
+    if (!is.null(val) && !is.na(val)) {
+      if (!identical(val, isolate(input$num_cores))) updateNumericInput(session, "num_cores", value = val)
+      if (!identical(val, isolate(input$num_cores_rfvs))) updateNumericInput(session, "num_cores_rfvs", value = val)
+    }
+  }, ignoreInit = TRUE)
 
   # Use the user's active session wd instead of the package directory.
   dynamic_wd <- getShinyOption("FVS_USER_WD", default = getwd())
@@ -63,20 +88,14 @@
     normalizePath(path, winslash = "/", mustWork = FALSE) # Normalize separators without requiring physical existence.
   }
 
-  sync_master_db_upload_label <- function(db_label) { # Keep custom fileInput caption aligned with hidden `master_db` state.
-    safe_db <- trimws(as.character(db_label)) # Normalize candidate label text.
-    if (!nzchar(safe_db)) safe_db <- "<FVS_Input.db>" # Apply placeholder when label is blank.
-    session$sendCustomMessage("set_master_db_label", list(value = safe_db)) # Push label update to browser-side widget script.
-  }
-
-  # Keep the visible fileInput label in sync whenever the hidden DB field changes,
-  # including initial auto-detection during app startup.
-  observeEvent(input$master_db, { # Mirror any `master_db` changes into visible upload label text.
-    db_label <- trimws(as.character(input$master_db)) # Snapshot current DB label.
-    session$onFlushed(function() { # Delay DOM message until current reactive flush completes.
-      sync_master_db_upload_label(db_label) # Apply synchronized browser label update.
-    }, once = TRUE)
-  }, ignoreInit = FALSE) # Run on app load and on subsequent edits.
+  observeEvent(input$browse_db, { # Open native file picker for Database selection.
+    req(input$browse_db > 0) # Ensure click event fired.
+    default_root <- normalize_dir_input(input$root_dir, fallback = dynamic_wd) # Seed picker with current root or fallback.
+    selected_file <- get_native_file(default_path = default_root, caption_text = "Select Master Database File") # Show platform file chooser.
+    if (!is.null(selected_file)) { # Update only when user confirms a file.
+      updateTextInput(session, "master_db", value = normalizePath(selected_file, winslash = "/", mustWork = FALSE)) # Persist normalized file path into UI.
+    }
+  }, ignoreInit = TRUE) # Do not run until user explicitly clicks.
 
   observeEvent(input$browse_root, { # Open native folder picker for Root directory selection.
     req(input$browse_root > 0) # Ensure click event fired.
@@ -95,28 +114,6 @@
       updateTextInput(session, "kcp_dir", value = normalizePath(selected_dir, winslash = "/", mustWork = FALSE)) # Persist normalized KCP directory into UI.
     }
   }, ignoreInit = TRUE) # Do not run until user explicitly clicks.
-
-  observeEvent(input$master_db_upload, { # Stage uploaded DB file into runtime `Inputs` directory and wire UI state.
-    file_info <- input$master_db_upload # Uploaded file metadata from fileInput.
-    req(file_info) # Require an actual upload payload.
-
-    runtime_root <- normalizePath(input$root_dir, winslash = "/", mustWork = FALSE) # Resolve runtime root directory.
-    inputs_dir <- normalizePath(file.path(runtime_root, "Inputs"), winslash = "/", mustWork = FALSE) # Resolve destination staging directory.
-    if (!dir.exists(inputs_dir)) dir.create(inputs_dir, recursive = TRUE, showWarnings = FALSE) # Create `Inputs` when missing.
-
-    db_name <- basename(file_info$name) # Preserve uploaded filename for UI/db lookup consistency.
-    db_dest <- file.path(inputs_dir, db_name) # Build destination path under Inputs.
-    copied <- tryCatch(file.copy(file_info$datapath, db_dest, overwrite = TRUE), error = function(e) FALSE) # Copy temp upload into project staging area.
-
-    if (!isTRUE(copied)) { # Abort when file staging fails.
-      showNotification("Failed to stage uploaded database into Inputs.", type = "error") # Surface copy failure.
-      return() # Exit observer early.
-    }
-
-    updateTextInput(session, "master_db", value = db_name) # Point active DB selector to staged file name.
-    sync_master_db_upload_label(db_name) # Keep visible upload label synchronized.
-    showNotification(sprintf("Master database staged to %s", db_dest), type = "message") # Confirm successful staging.
-  }, ignoreInit = TRUE) # Trigger only on user upload action.
   
   find_input_dir <- function(root_dir) { # Discover best matching top-level input directory under project root.
     top_dirs <- tryCatch(list.dirs(root_dir, full.names = TRUE, recursive = FALSE), error = function(e) character(0)) # List first-level directories safely.
@@ -216,8 +213,6 @@
     updateTextInput(session, "master_db", value = d$db) # Seed DB input.
     updateTextInput(session, "kcp_dir", value = d$kcp) # Seed KCP input.
 
-    # Keep visible file input text synchronized with the detected DB.
-    sync_master_db_upload_label(d$db) # Align visible upload label with seeded DB input.
     defaults_initialized(TRUE) # Mark initialization complete.
   })
 
@@ -227,7 +222,6 @@
     if (!nzchar(trimws(as.character(detected_db)))) detected_db <- "<FVS_Input.db>" # Fall back to placeholder when detection fails.
 
     updateTextInput(session, "master_db", value = detected_db) # Push detected/placeholder DB value to UI.
-    sync_master_db_upload_label(detected_db) # Keep upload label synchronized with DB input.
   }, ignoreInit = TRUE) # Ignore initial load because startup observer handles defaulting.
   
   meta <- reactiveValues(groups = NULL, catalog = NULL, types = NULL) # Shared metadata cache for groups/catalog/type definitions.
@@ -349,8 +343,42 @@
     }
   }, ignoreInit = TRUE) # Run only when user/observer changes stand table.
   
+  refresh_merge_controls <- function() {
+    req(input$master_db, input$root_dir, input$stand_tbl)
+    full_db_path <- resolve_db_path(input$root_dir, input$master_db)
+    if (!file.exists(full_db_path)) return()
+    
+    con_m <- tryCatch(dbConnect(SQLite(), full_db_path), error = function(e) NULL)
+    if (is.null(con_m)) return()
+    on.exit(try(dbDisconnect(con_m), silent = TRUE), add = TRUE)
+    
+    table_cols <- tryCatch(dbListFields(con_m, input$stand_tbl), error = function(e) character(0))
+    if (length(table_cols) == 0) return()
+    
+    updateSelectizeInput(session, "merge_cols_select", choices = sort(table_cols))
+    
+    if ("GROUPS" %in% toupper(table_cols)) {
+      grp_col_name <- table_cols[toupper(table_cols) == "GROUPS"][1]
+      sql_grp <- sprintf("SELECT %s FROM %s WHERE %s IS NOT NULL AND TRIM(CAST(%s AS TEXT)) != ''",
+                         quote_sql_identifier(grp_col_name), quote_sql_identifier(input$stand_tbl),
+                         quote_sql_identifier(grp_col_name), quote_sql_identifier(grp_col_name))
+      raw_groups <- tryCatch(dbGetQuery(con_m, sql_grp)[[1]], error = function(e) character(0))
+      if (length(raw_groups) > 0) {
+        words <- unlist(strsplit(raw_groups, "\\s+"))
+        words <- words[nzchar(words)]
+        keys <- sapply(strsplit(words, "="), `[`, 1)
+        updateSelectizeInput(session, "merge_groups_select", choices = sort(unique(keys)))
+      } else {
+        updateSelectizeInput(session, "merge_groups_select", choices = character(0))
+      }
+    } else {
+      updateSelectizeInput(session, "merge_groups_select", choices = character(0))
+    }
+  }
+
   observeEvent(list(input$use_groups_col, input$master_db, input$root_dir, input$stand_tbl), { # Rebuild grouping widgets whenever grouping mode or DB context changes.
     refresh_grouping_controls() # Delegate full selector refresh logic.
+    refresh_merge_controls() # Delegate merge selector refresh logic.
   }, ignoreInit = FALSE) # Execute on startup and subsequent input changes.
   
   observeEvent(input$group_col, { # Recompute exclude-group choices when selected group column changes.
@@ -515,7 +543,7 @@
           con_m <- dbConnect(SQLite(), full_db_path) # Open metadata DB connection.
           on.exit(try(dbDisconnect(con_m), silent = TRUE), add = TRUE) # Ensure DB connection closes on exit.
           
-          # Build indexes on the Stand Init table
+        # Build indexes on the Stand Init table
           try(dbExecute(con_m, sprintf("CREATE INDEX IF NOT EXISTS idx_%s_cn ON %s (STAND_CN)", input$stand_tbl, quote_sql_identifier(input$stand_tbl))), silent = TRUE) # Create STAND_CN index to improve stand lookups.
           try(dbExecute(con_m, sprintf("CREATE INDEX IF NOT EXISTS idx_%s_id ON %s (STAND_ID)", input$stand_tbl, quote_sql_identifier(input$stand_tbl))), silent = TRUE) # Create STAND_ID index to improve stand lookups.
           
@@ -634,7 +662,197 @@
       grid_data(df) # Persist updated matrix for downstream pipeline steps.
     }
   }, ignoreNULL = FALSE) # Run even when selection is NULL/empty so fallback naming (for example GROUP_CODE + _NG) is applied.
+
+  observeEvent(input$btn_create_merged_col, {
+    mode <- input$merge_col_mode
+    standalone_table <- input$stand_tbl
+    
+    root <- normalizePath(trimws(input$root_dir), winslash = "/", mustWork = FALSE)
+    if (!nzchar(root)) root <- normalizePath(getShinyOption("FVS_USER_WD", default = getwd()), winslash = "/", mustWork = FALSE)
+    db_name <- trimws(as.character(input$master_db))
+    db_path <- resolve_db_path(root, db_name)
+    
+    if (!file.exists(db_path)) {
+      showNotification("Database not found. Please scan directory first.", type = "error")
+      return()
+    }
+    
+    if (mode == "cols") {
+      cols <- input$merge_cols_select
+      if (length(cols) < 2) {
+        showNotification("Please select at least 2 columns to merge.", type = "warning")
+        return()
+      }
+      new_col_name <- paste(cols, collapse = "_")
+      
+      con <- dbConnect(SQLite(), db_path)
+      on.exit(dbDisconnect(con), add = TRUE)
+      
+      if (new_col_name %in% dbListFields(con, standalone_table)) {
+         showNotification(sprintf("Column '%s' already exists.", new_col_name), type = "warning")
+         return()
+      }
+      
+      tryCatch({
+        dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN %s TEXT", quote_sql_identifier(standalone_table), quote_sql_identifier(new_col_name)))
+        
+        # SQLite concat operator is ||. Handle NULLs cleanly so we don't accidentally blank out the whole string.
+        concat_expr <- paste(sprintf("IFNULL(CAST(%s AS TEXT), '')", sapply(cols, quote_sql_identifier)), collapse = " || '_' || ")
+        
+        sql_update <- sprintf("UPDATE %s SET %s = %s", quote_sql_identifier(standalone_table), quote_sql_identifier(new_col_name), concat_expr)
+        dbExecute(con, sql_update)
+        
+        showNotification(sprintf("Successfully created merged column: %s", new_col_name), type = "message")
+        
+        # Update dropdowns
+        table_cols <- dbListFields(con, standalone_table)
+        updateSelectInput(session, "group_col", choices = sort(table_cols), selected = new_col_name)
+        updateSelectizeInput(session, "merge_cols_select", choices = sort(table_cols))
+      }, error = function(e) {
+        showNotification(paste("Error merging columns:", e$message), type = "error")
+      })
+      
+    } else if (mode == "groups") {
+      groups <- input$merge_groups_select
+      if (length(groups) < 2) {
+        showNotification("Please select at least 2 GROUP entries to merge.", type = "warning")
+        return()
+      }
+      
+      new_col_name <- paste(groups, collapse = "_")
+      con <- dbConnect(SQLite(), db_path)
+      on.exit(dbDisconnect(con), add = TRUE)
+      
+      table_cols <- dbListFields(con, standalone_table)
+      grp_col_candidates <- table_cols[toupper(table_cols) == "GROUPS"]
+      if (length(grp_col_candidates) == 0) {
+        showNotification("GROUPS column not found in Stand Initialization table.", type = "error")
+        return()
+      }
+      grp_col_name <- grp_col_candidates[1]
+      
+      if (new_col_name %in% table_cols) {
+         showNotification(sprintf("Column '%s' already exists.", new_col_name), type = "warning")
+         return()
+      }
+      
+      withProgress(message = "Merging GROUP entries...", value = 0.5, {
+        tryCatch({
+          df_stand <- dbGetQuery(con, sprintf("SELECT rowid, %s FROM %s", quote_sql_identifier(grp_col_name), quote_sql_identifier(standalone_table)))
+          
+          # Iterate through selected groups and repeatedly run the extraction function
+          merged_vals <- rep("", nrow(df_stand))
+          for (i in seq_along(groups)) {
+             g <- groups[i]
+             vals <- extract_group_values_vectorized(df_stand[[grp_col_name]], g)
+             vals[is.na(vals)] <- ""
+             if (i == 1) {
+               merged_vals <- vals
+             } else {
+               merged_vals <- paste(merged_vals, vals, sep = "_")
+             }
+          }
+          
+          # Clean up prefix/suffix underscores and convert true blanks back to NA
+          merged_vals <- gsub("^_|_$", "", merged_vals)
+          merged_vals <- gsub("_+", "_", merged_vals)
+          merged_vals[merged_vals == ""] <- NA_character_
+          
+          dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN %s TEXT", quote_sql_identifier(standalone_table), quote_sql_identifier(new_col_name)))
+          
+          # Parameterized update back to the SQLite DB
+          update_df <- data.frame(new_val = merged_vals, row_id = df_stand$rowid, stringsAsFactors = FALSE)
+          update_df <- update_df[!is.na(update_df$new_val), ]
+          
+          if (nrow(update_df) > 0) {
+             sql_update <- sprintf("UPDATE %s SET %s = :new_val WHERE rowid = :row_id", quote_sql_identifier(standalone_table), quote_sql_identifier(new_col_name))
+             res <- dbSendStatement(con, sql_update)
+             dbBind(res, params = list(new_val = update_df$new_val, row_id = update_df$row_id))
+             dbClearResult(res)
+          }
+          
+          showNotification(sprintf("Successfully created merged column: %s", new_col_name), type = "message")
+          
+          table_cols <- dbListFields(con, standalone_table)
+          updateSelectInput(session, "group_col", choices = sort(table_cols), selected = new_col_name)
+          updateSelectizeInput(session, "merge_cols_select", choices = sort(table_cols))
+        }, error = function(e) {
+          showNotification(paste("Error merging GROUPS entries:", e$message), type = "error")
+        })
+      })
+    }
+  })
   
+  observeEvent(input$btn_expand_modal, { # Open modal for auto-populating KCP combinations
+    req(meta$groups, meta$types) # Ensure metadata is available
+    
+    showModal(modalDialog(
+      title = "Auto-Populate Scenario Combinations",
+      p("Automatically generate dedicated scenario rows for every KCP file present in a selected folder. This cross-joins the checked combinations and adds them to the grid below."),
+      selectizeInput("expand_groups", "Target Group(s) [Leave blank for ALL]:", choices = meta$groups, multiple = TRUE, width = "100%"),
+      selectInput("expand_folder", "Target KCP Folder (Type):", choices = meta$types, width = "100%"),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("do_expand", "Generate Rows", class = "btn-success", icon = icon("check"))
+      ),
+      size = "m",
+      easyClose = TRUE
+    ))
+  })
+
+  observeEvent(input$do_expand, { # Execute combination expansion cross-join logic
+    df <- grid_data()
+    if (nrow(df) == 0) {
+      removeModal()
+      return()
+    }
+    
+    target_groups <- input$expand_groups
+    if (length(target_groups) == 0) target_groups <- meta$groups # Empty implies all known groups
+    
+    target_folder <- input$expand_folder
+    
+    # Retrieve physically available KCP file names for this specific type directly from the catalog
+    kcp_vals <- meta$catalog$KCP_Name[meta$catalog$KCP_Type == target_folder & !is.na(meta$catalog$KCP_Name)]
+    
+    if (length(kcp_vals) == 0) {
+      showNotification(sprintf("No KCP files found in folder '%s'.", target_folder), type = "warning")
+      removeModal()
+      return()
+    }
+    
+    # Build expanded row blocks for target groups
+    expanded_rows <- lapply(target_groups, function(grp) {
+      base_rows <- df[df$GROUP_CODE == grp, , drop = FALSE]
+      if (nrow(base_rows) > 0) {
+        base_row <- base_rows[1, , drop = FALSE] # Preserve the first existing row to carry over column selections like Global/Calib settings
+      } else {
+        base_row <- df[1, , drop = FALSE] # Fallback in case of missing group entirely
+        base_row[1, ] <- NA
+        base_row$GROUP_CODE <- grp
+      }
+      
+      rep_df <- base_row[rep(1, length(kcp_vals)), , drop = FALSE]
+      rep_df[[target_folder]] <- kcp_vals
+      rep_df
+    })
+    
+    # Combine back together: keep ALL of the original df (including blanks), then append the newly expanded rows
+    expanded_df <- do.call(rbind, expanded_rows)
+    final_df <- rbind(df, expanded_df)
+    
+    # Sort and re-index for display neatness
+    final_df <- final_df[order(final_df$GROUP_CODE), ]
+    rownames(final_df) <- NULL
+    
+    # Recalculate Scenario strings to accommodate the new populated rows
+    final_df <- recalculate_scenarios(final_df, scenario_cols = input$scenario_add_cols, force_auto = TRUE)
+    
+    grid_data(final_df)
+    removeModal()
+    showNotification(sprintf("Successfully generated %d row combinations.", nrow(expanded_df)), type = "message")
+  })
+
   output$download_excel <- downloadHandler( # Export the current lookup matrix as an xlsx file.
     filename = function() { # Build a date-stamped default file name.
       paste0("FVS_KCP_Lookup_", Sys.Date(), ".xlsx") # Return download file name.
