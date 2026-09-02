@@ -696,10 +696,17 @@
       tryCatch({
         dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN %s TEXT", quote_sql_identifier(standalone_table), quote_sql_identifier(new_col_name)))
         
-        # SQLite concat operator is ||. Handle NULLs cleanly so we don't accidentally blank out the whole string.
-        concat_expr <- paste(sprintf("IFNULL(CAST(%s AS TEXT), '')", sapply(cols, quote_sql_identifier)), collapse = " || '_' || ")
-        
-        sql_update <- sprintf("UPDATE %s SET %s = %s", quote_sql_identifier(standalone_table), quote_sql_identifier(new_col_name), concat_expr)
+        # Only populate the merged column when all source columns are non-NULL.
+        concat_expr <- paste(sprintf("CAST(%s AS TEXT)", sapply(cols, quote_sql_identifier)), collapse = " || '_' || ")
+        nonnull_condition <- paste(sprintf("%s IS NOT NULL", sapply(cols, quote_sql_identifier)), collapse = " AND ")
+
+        sql_update <- sprintf(
+          "UPDATE %s SET %s = CASE WHEN %s THEN %s ELSE NULL END",
+          quote_sql_identifier(standalone_table),
+          quote_sql_identifier(new_col_name),
+          nonnull_condition,
+          concat_expr
+        )
         dbExecute(con, sql_update)
         
         showNotification(sprintf("Successfully created merged column: %s", new_col_name), type = "message")
