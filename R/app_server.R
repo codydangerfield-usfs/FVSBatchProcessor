@@ -1660,6 +1660,59 @@
         .options.snow = list(progress = progress_callback) # Wire completion callback for UI progress.
       ) %dopar% {
         qid_local <- function(x) paste0('"', gsub('"', '""', x), '"') # Worker-local identifier quoting helper.
+        sqlite_affinity_local <- function(declared_type) { # Reduce source declarations to safe SQLite affinities for added columns.
+          declared_type <- toupper(ifelse(is.na(declared_type), "", declared_type))
+          if (grepl("INT", declared_type)) return("INTEGER")
+          if (grepl("CHAR|CLOB|TEXT", declared_type)) return("TEXT")
+          if (grepl("REAL|FLOA|DOUB", declared_type)) return("REAL")
+          if (!nzchar(declared_type) || grepl("BLOB", declared_type)) return("BLOB")
+          "NUMERIC"
+        }
+        append_attached_table_local <- function(con, source_schema, table_name) { # Union schemas and append source rows by column name.
+          table_q <- qid_local(table_name)
+          source_info <- dbGetQuery(con, sprintf("PRAGMA %s.table_info(%s)", source_schema, table_q))
+          if (nrow(source_info) == 0) return(invisible(NULL))
+
+          destination_exists <- toupper(table_name) %in% toupper(dbListTables(con))
+          if (!destination_exists) {
+            dbExecute(con, sprintf("CREATE TABLE %s AS SELECT * FROM %s.%s", table_q, source_schema, table_q))
+            return(invisible(NULL))
+          }
+
+          destination_info <- dbGetQuery(con, sprintf("PRAGMA main.table_info(%s)", table_q))
+          destination_keys <- toupper(destination_info$name)
+          new_source_rows <- source_info[!(toupper(source_info$name) %in% destination_keys), , drop = FALSE]
+          if (nrow(new_source_rows) > 0) {
+            for (column_idx in seq_len(nrow(new_source_rows))) {
+              column_name <- new_source_rows$name[column_idx]
+              column_type <- sqlite_affinity_local(new_source_rows$type[column_idx])
+              dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN %s %s", table_q, qid_local(column_name), column_type))
+            }
+            destination_info <- dbGetQuery(con, sprintf("PRAGMA main.table_info(%s)", table_q))
+          }
+
+          source_match <- match(toupper(destination_info$name), toupper(source_info$name))
+          select_expressions <- vapply(seq_len(nrow(destination_info)), function(column_idx) {
+            if (is.na(source_match[column_idx])) {
+              sprintf("NULL AS %s", qid_local(destination_info$name[column_idx]))
+            } else {
+              qid_local(source_info$name[source_match[column_idx]])
+            }
+          }, character(1))
+          destination_columns <- paste(vapply(destination_info$name, qid_local, character(1)), collapse = ", ")
+          dbExecute(
+            con,
+            sprintf(
+              "INSERT INTO %s (%s) SELECT %s FROM %s.%s",
+              table_q,
+              destination_columns,
+              paste(select_expressions, collapse = ", "),
+              source_schema,
+              table_q
+            )
+          )
+          invisible(NULL)
+        }
         grp  <- unique_combos$GROUP_CODE[combo_idx] # Current group code for this combo task.
         scen <- unique_combos$Scenario[combo_idx] # Current scenario label for this combo task.
 
@@ -1706,14 +1759,9 @@
 
               dbBegin(m_con) # Use transaction for atomic per-stand append.
               tables_in_src <- dbGetQuery(m_con, "SELECT name FROM srcdb.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")$name # Enumerate user tables from stand DB.
-              for (tbl_name in tables_in_src) { # Serial table loop: create once, then append for subsequent stands.
-                tbl_q <- qid_local(tbl_name) # Quote table identifier safely.
-                if (!(tbl_name %in% created_tables)) { # First encounter of this table in destination.
-                  dbExecute(m_con, sprintf("CREATE TABLE %s AS SELECT * FROM srcdb.%s", tbl_q, tbl_q)) # Create destination table from source schema/data.
-                  created_tables <- c(created_tables, tbl_name) # Track table as created.
-                } else {
-                  dbExecute(m_con, sprintf("INSERT INTO %s SELECT * FROM srcdb.%s", tbl_q, tbl_q)) # Append additional stand rows.
-                }
+              for (tbl_name in tables_in_src) { # Serial table loop: union schemas and append rows by matching column names.
+                append_attached_table_local(m_con, "srcdb", tbl_name)
+                if (!(tbl_name %in% created_tables)) created_tables <- c(created_tables, tbl_name)
               }
               dbCommit(m_con) # Commit successful per-stand append.
               dbExecute(m_con, "DETACH DATABASE srcdb") # Detach source DB before next stand.
@@ -1748,6 +1796,59 @@
         dbExecute(all_rFVS_sims, "PRAGMA temp_store = MEMORY") # Keep temp data in memory.
         dbExecute(all_rFVS_sims, "PRAGMA cache_size = -200000") # Increase cache for streaming inserts.
         mega_created_tables <- character(0) # Track tables created in project-level destination DB.
+        sqlite_affinity <- function(declared_type) { # Reduce source declarations to safe SQLite affinities for added columns.
+          declared_type <- toupper(ifelse(is.na(declared_type), "", declared_type))
+          if (grepl("INT", declared_type)) return("INTEGER")
+          if (grepl("CHAR|CLOB|TEXT", declared_type)) return("TEXT")
+          if (grepl("REAL|FLOA|DOUB", declared_type)) return("REAL")
+          if (!nzchar(declared_type) || grepl("BLOB", declared_type)) return("BLOB")
+          "NUMERIC"
+        }
+        append_attached_table <- function(con, source_schema, table_name) { # Union schemas and append source rows by column name.
+          table_q <- qid(table_name)
+          source_info <- dbGetQuery(con, sprintf("PRAGMA %s.table_info(%s)", source_schema, table_q))
+          if (nrow(source_info) == 0) return(invisible(NULL))
+
+          destination_exists <- toupper(table_name) %in% toupper(dbListTables(con))
+          if (!destination_exists) {
+            dbExecute(con, sprintf("CREATE TABLE %s AS SELECT * FROM %s.%s", table_q, source_schema, table_q))
+            return(invisible(NULL))
+          }
+
+          destination_info <- dbGetQuery(con, sprintf("PRAGMA main.table_info(%s)", table_q))
+          destination_keys <- toupper(destination_info$name)
+          new_source_rows <- source_info[!(toupper(source_info$name) %in% destination_keys), , drop = FALSE]
+          if (nrow(new_source_rows) > 0) {
+            for (column_idx in seq_len(nrow(new_source_rows))) {
+              column_name <- new_source_rows$name[column_idx]
+              column_type <- sqlite_affinity(new_source_rows$type[column_idx])
+              dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN %s %s", table_q, qid(column_name), column_type))
+            }
+            destination_info <- dbGetQuery(con, sprintf("PRAGMA main.table_info(%s)", table_q))
+          }
+
+          source_match <- match(toupper(destination_info$name), toupper(source_info$name))
+          select_expressions <- vapply(seq_len(nrow(destination_info)), function(column_idx) {
+            if (is.na(source_match[column_idx])) {
+              sprintf("NULL AS %s", qid(destination_info$name[column_idx]))
+            } else {
+              qid(source_info$name[source_match[column_idx]])
+            }
+          }, character(1))
+          destination_columns <- paste(vapply(destination_info$name, qid, character(1)), collapse = ", ")
+          dbExecute(
+            con,
+            sprintf(
+              "INSERT INTO %s (%s) SELECT %s FROM %s.%s",
+              table_q,
+              destination_columns,
+              paste(select_expressions, collapse = ", "),
+              source_schema,
+              table_q
+            )
+          )
+          invisible(NULL)
+        }
 
         for (k in seq_along(scen_db_paths)) { # Serial loop: append each scenario DB into one project master DB.
           scen_db_path <- scen_db_paths[k] # Current scenario DB path to attach.
@@ -1758,14 +1859,9 @@
             dbBegin(all_rFVS_sims) # Wrap each scenario append in a transaction.
             tabs <- dbGetQuery(all_rFVS_sims, "SELECT name FROM sDB.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")$name # Enumerate source user tables.
 
-            for (tbl in tabs) { # Serial table loop: create once then append subsequent scenario rows.
-              tbl_q <- qid(tbl) # Quote table identifier safely.
-              if (!(tbl %in% mega_created_tables)) { # First time this table appears in master DB.
-                dbExecute(all_rFVS_sims, sprintf("CREATE TABLE %s AS SELECT * FROM sDB.%s", tbl_q, tbl_q)) # Create destination table and seed with rows.
-                mega_created_tables <- c(mega_created_tables, tbl) # Track newly created table.
-              } else {
-                dbExecute(all_rFVS_sims, sprintf("INSERT INTO %s SELECT * FROM sDB.%s", tbl_q, tbl_q)) # Append rows for this table from current scenario DB.
-              }
+            for (tbl in tabs) { # Serial table loop: union schemas and append rows by matching column names.
+              append_attached_table(all_rFVS_sims, "sDB", tbl)
+              if (!(tbl %in% mega_created_tables)) mega_created_tables <- c(mega_created_tables, tbl)
             }
             dbCommit(all_rFVS_sims) # Commit successful scenario append.
             dbExecute(all_rFVS_sims, "DETACH DATABASE sDB") # Detach source before next iteration.
