@@ -138,7 +138,12 @@ ui <- function(request) {
             )
         ),
         hr(),
-        textInput("stand_tbl", "Stand Initialization Table", value = "FVS_STANDINIT"),
+        selectInput(
+          "stand_tbl",
+          "Stand Initialization Table",
+          choices = "FVS_STANDINIT",
+          selected = "FVS_STANDINIT"
+        ),
 
         tags$details(
           style = "margin-top: 10px; margin-bottom: 15px; font-size: 0.9em; color: #555;",
@@ -187,6 +192,7 @@ ui <- function(request) {
         selectInput("scenario_add_cols", "Scenario Columns (In Addition To GROUP_CODE)", choices = NULL, multiple = TRUE),
         hr(),
         actionButton("btn_expand_modal", " Auto-Populate Combinations", icon = icon("wand-magic-sparkles"), class = "btn-info w-100 mb-2"),
+        hr(),
         downloadButton("download_excel", "Export Matrix to Excel", class = "btn-outline-primary w-100 mb-2"),
         fileInput("upload_excel", "Import Excel Matrix File", accept = c(".xlsx", ".xls", ".csv"), buttonLabel = "Browse..."),
         hr(),
@@ -217,6 +223,12 @@ ui <- function(request) {
         hr(),
         h5("Execution Workflow"),
         selectInput("overwrite_scens", "Force Overwrite Specific Scenarios:", choices = NULL, multiple = TRUE),
+        checkboxInput(
+          "test_run_mode",
+          "Test mode: Run first stand in each group/scenario",
+          value = FALSE
+        ),
+        helpText("Uses one deterministic stand/keyfile per GROUP_CODE and Scenario. Overwrite selections still apply."),
         actionButton("run_rfvs", "Execute Parallel rFVS Engine", icon = icon("play"), class = "btn-primary w-100 mb-2"),
         div(
           id = "kill_run_btn_wrap",
@@ -395,7 +407,7 @@ ui <- function(request) {
             card(
               card_header("Editable Scenario Definitions Matrix"),
               p(em("Note: Changes made inside the grid synchronize automatically. You can right-click rows to expand/delete elements.")),
-              p(strong("Reminder: "), "The columns below are dynamically built based on your KCP subfolders. The numerical/alphabetical order of those root folders dictates how those KCPs are stacked together for the simulation. For each KCP subfolder, you can select ", code("ALL"), " in the drop down, this option will stack all of the kcps in that folder together. If you want to generate a run for each kcp in the folder, use the auto-populate combinations button to select the ", code("GROUP_CODE"), " and subfolder at which you'd like to generate all combinations. ", strong("Importantly, each distinct FVS run is predicated on its unique Scenario name. Duplicate scenario names are not allowed.")),
+              p(strong("Reminder: "), "The columns below are dynamically built based on your KCP subfolders. The numerical/alphabetical order of those root folders dictates how those KCPs are stacked together for the simulation. For each KCP subfolder, you can select ", code("ALL"), " in the drop down; this option stacks all KCPs in that folder together. To generate combinations, use Auto-Populate Combinations and select the target ", code("GROUP_CODE"), " values plus one or more KCP columns. Selecting multiple columns creates their full cross-product, such as every Prescription and Timing pairing. ", strong("Importantly, each distinct FVS run is predicated on its unique Scenario name. Duplicate scenario names are not allowed.")),
               rHandsontableOutput("prescription_table", height = "600px")
               
             )

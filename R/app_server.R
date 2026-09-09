@@ -7,6 +7,8 @@
   step_start_gen <- reactiveVal(NULL) # Stores Step 1 start time for elapsed-time formatting.
   step_start_run <- reactiveVal(NULL) # Stores Step 2 start time.
   step_start_merge <- reactiveVal(NULL) # Stores Step 3 start time.
+  active_run_total <- reactiveVal(NULL) # Snapshots the Step 2 queue size for stable progress reporting.
+  active_run_is_test <- reactiveVal(FALSE) # Records whether the active Step 2 process uses the sampled queue.
   
   gen_prog <- NULL # UI progress modal instance for Step 1.
   run_prog <- NULL # UI progress modal instance for Step 2.
@@ -90,8 +92,10 @@
 
   observeEvent(input$browse_db, { # Open native file picker for Database selection.
     req(input$browse_db > 0) # Ensure click event fired.
-    default_root <- normalize_dir_input(input$root_dir, fallback = dynamic_wd) # Seed picker with current root or fallback.
-    selected_file <- get_native_file(default_path = default_root, caption_text = "Select Master Database File") # Show platform file chooser.
+    working_dir <- normalize_dir_input(dynamic_wd) # Resolve the directory from which the application was launched.
+    default_db_dir <- find_input_dir(working_dir) # Prefer an existing Input/Inputs-like project folder.
+    if (!nzchar(default_db_dir)) default_db_dir <- working_dir # Fall back safely when the project has no input folder.
+    selected_file <- get_native_file(default_path = default_db_dir, caption_text = "Select Master Database File") # Show platform file chooser.
     if (!is.null(selected_file)) { # Update only when user confirms a file.
       updateTextInput(session, "master_db", value = normalizePath(selected_file, winslash = "/", mustWork = FALSE)) # Persist normalized file path into UI.
     }
@@ -99,7 +103,8 @@
 
   observeEvent(input$browse_root, { # Open native folder picker for Root directory selection.
     req(input$browse_root > 0) # Ensure click event fired.
-    default_root <- normalize_dir_input(input$root_dir, fallback = dynamic_wd) # Seed picker with current root or fallback.
+    working_dir <- normalize_dir_input(dynamic_wd) # Resolve the directory from which the application was launched.
+    default_root <- normalizePath(dirname(working_dir), winslash = "/", mustWork = FALSE) # Start one level up so the project folder is visible.
     selected_dir <- get_native_folder(default_path = default_root, caption_text = "Select Root Folder Path") # Show platform folder chooser.
     if (!is.null(selected_dir)) { # Update only when user confirms a folder.
       updateTextInput(session, "root_dir", value = normalizePath(selected_dir, winslash = "/", mustWork = FALSE)) # Persist normalized folder into UI.
@@ -228,17 +233,23 @@
   grid_data <- reactiveVal(data.frame()) # Central editable matrix backing the Handsontable UI.
   suppress_next_scenario_auto_recalc <- reactiveVal(FALSE) # One-shot guard against programmatic scenario-selector recalc.
   
-  observeEvent(c(input$master_db, input$root_dir), { # Auto-pick a preferred StandInit table when root/db changes.
+  observeEvent(list(input$master_db, input$root_dir), { # Populate and auto-pick a preferred StandInit table when root/db changes or startup defaults arrive.
     req(input$master_db, input$root_dir) # Require both root and DB inputs before querying.
     full_db_path <- resolve_db_path(input$root_dir, input$master_db) # Resolve target DB path.
-    if (file.exists(full_db_path)) { # Proceed only when DB exists.
-      tryCatch({ # Suppress hard failures from incomplete/corrupt DB states.
+    if (!file.exists(full_db_path)) { # Do not retain a misleading placeholder when the current DB cannot be opened.
+      updateSelectInput(session, "stand_tbl", choices = character(0), selected = character(0))
+      return()
+    }
+
+    tryCatch({ # Keep discovery failures from terminating the session while making them visible for diagnosis.
         local({ # Scope connection lifecycle locally.
           con <- dbConnect(SQLite(), full_db_path) # Open SQLite connection.
           on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE) # Always close connection on exit.
-          tables <- dbGetQuery(con, "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'FVS_StandInit%'")$name # Enumerate candidate stand tables.
-          if (length(tables) > 0) { # Choose preferred table from available candidates.
-            tables_lower <- tolower(tables) # Case-insensitive comparison vector.
+          all_tables <- dbListTables(con) # Read physical table names exactly as stored in the selected database.
+          tables <- all_tables[grepl("standinit", tolower(all_tables), fixed = TRUE)] # Include every table containing StandInit, regardless of capitalization or position.
+          tables <- sort(unique(tables)) # Present stable, deduplicated dropdown choices.
+          if (length(tables) > 0) { # Choose the preferred table while retaining all matches as user-selectable options.
+            tables_lower <- tolower(tables) # Case-insensitive comparison vector used only for priority matching.
             if ("fvs_standinit_cond" %in% tables_lower) {
               target_tbl <- tables[tables_lower == "fvs_standinit_cond"][1] # Highest preference: conditional stand table.
             } else if ("fvs_standinit" %in% tables_lower) {
@@ -248,12 +259,16 @@
             } else {
               target_tbl <- tables[1] # Fallback: first matching stand table.
             }
-            updateTextInput(session, "stand_tbl", value = target_tbl) # Publish selected table into UI.
+            updateSelectInput(session, "stand_tbl", choices = tables, selected = target_tbl) # Populate all matches and auto-select the existing priority winner.
+          } else {
+            updateSelectInput(session, "stand_tbl", choices = character(0), selected = character(0)) # Clear stale choices when the database has no StandInit table.
           }
         })
-      }, error = function(e) {}) # Silent failure by design to avoid noisy startup notifications.
-    }
-  }, ignoreInit = TRUE) # React only to user/observer-driven changes after app init.
+      }, error = function(e) { # Clear stale values and report why discovery failed.
+        updateSelectInput(session, "stand_tbl", choices = character(0), selected = character(0))
+        showNotification(paste("Could not load StandInit table choices:", e$message), type = "error", duration = 8)
+      })
+  }, ignoreNULL = FALSE, ignoreInit = FALSE) # Run during initial binding and again when programmatic defaults or user inputs change.
   
   refresh_grouping_controls <- function() { # Rebuild group-column and excluded-group selectors from current DB context.
     req(input$master_db, input$root_dir, input$stand_tbl) # Require core DB/table inputs.
@@ -276,12 +291,18 @@
     }
     
     current_group_col <- isolate(input$group_col) # Snapshot current selected group column.
+    current_group_match <- if (length(current_group_col) == 1 && nzchar(current_group_col)) { # Resolve an existing selection without requiring identical database casing.
+      cols[toupper(cols) == toupper(current_group_col)][1]
+    } else {
+      NA_character_
+    }
+    variant_col <- if (!use_grp) cols[toupper(cols) == "VARIANT"][1] else NA_character_ # Preserve the database's actual spelling while locating VARIANT case-insensitively.
     selected_group_col <- if (length(cols) == 0) {
       character(0) # No available choices.
-    } else if (length(current_group_col) == 1 && nzchar(current_group_col) && current_group_col %in% cols) {
-      current_group_col # Retain existing valid selection.
-    } else if (!use_grp && "VARIANT" %in% cols) {
-      "VARIANT" # Prefer VARIANT by default in direct-column mode when present.
+    } else if (!is.na(current_group_match)) {
+      current_group_match # Retain the matching physical column name even when legacy casing differs.
+    } else if (!is.na(variant_col)) {
+      variant_col # Prefer the actual VARIANT column by default in direct-column mode.
     } else {
       cols[1] # Fallback to first available column.
     }
@@ -327,8 +348,15 @@
               }
             }
             
-            if ("VARIANT" %in% toupper(cols)) { # Notify user when multiple variants exist in selected stand table.
-              var_query <- sprintf("SELECT DISTINCT VARIANT FROM %s WHERE VARIANT IS NOT NULL AND TRIM(VARIANT) != ''", quote_sql_identifier(input$stand_tbl)) # Build distinct variant query.
+            variant_col <- cols[toupper(cols) == "VARIANT"][1] # Resolve legacy Variant/variant spellings to the physical database column.
+            if (!is.na(variant_col)) { # Notify user when multiple variants exist in selected stand table.
+              var_query <- sprintf(
+                "SELECT DISTINCT %s AS VARIANT FROM %s WHERE %s IS NOT NULL AND TRIM(CAST(%s AS TEXT)) != ''",
+                quote_sql_identifier(variant_col),
+                quote_sql_identifier(input$stand_tbl),
+                quote_sql_identifier(variant_col),
+                quote_sql_identifier(variant_col)
+              ) # Alias the query result so downstream R code can always use the canonical VARIANT name.
               var_df <- dbGetQuery(con, var_query) # Execute variant inventory query.
               if (nrow(var_df) > 0) {
                 unique_vars <- unique(tolower(trimws(var_df$VARIANT))) # Normalize variant labels for consistent counting.
@@ -367,6 +395,7 @@
         words <- unlist(strsplit(raw_groups, "\\s+"))
         words <- words[nzchar(words)]
         keys <- sapply(strsplit(words, "="), `[`, 1)
+        keys <- keys[!toupper(trimws(keys)) %in% c("NA", "<NA>", "NULL", "NONE")]
         updateSelectizeInput(session, "merge_groups_select", choices = sort(unique(keys)))
       } else {
         updateSelectizeInput(session, "merge_groups_select", choices = character(0))
@@ -444,14 +473,31 @@
         }
         
         cols <- dbListFields(con, input$stand_tbl) # Retrieve available columns from stand table.
-        has_var <- "VARIANT" %in% toupper(cols) # Detect whether a VARIANT column is present.
-        var_str <- if (has_var) ", VARIANT" else "" # Conditionally include VARIANT in SQL select list.
+
+        # Older FVS-ready databases use mixed-case names (for example Stand_ID, Stand_CN, and Variant).
+        # Resolve physical names case-insensitively, then alias query results to the canonical names expected by R.
+        stand_id_col <- cols[toupper(cols) == "STAND_ID"][1]
+        stand_cn_col <- cols[toupper(cols) == "STAND_CN"][1]
+        variant_col <- cols[toupper(cols) == "VARIANT"][1]
+
+        if (is.na(stand_id_col) || is.na(stand_cn_col)) { # Fail with a clear schema error only when the required fields are genuinely absent.
+          missing_cols <- c("STAND_ID", "STAND_CN")[c(is.na(stand_id_col), is.na(stand_cn_col))]
+          stop(sprintf("Required column(s) missing from table '%s': %s", input$stand_tbl, paste(missing_cols, collapse = ", ")))
+        }
+
+        stand_select <- sprintf(
+          "%s AS STAND_ID, %s AS STAND_CN",
+          quote_sql_identifier(stand_id_col),
+          quote_sql_identifier(stand_cn_col)
+        ) # Canonical aliases isolate all downstream R code from database column-name casing.
+        has_var <- !is.na(variant_col) # Detect VARIANT using the case-insensitive physical-name lookup.
+        var_str <- if (has_var) sprintf(", %s AS VARIANT", quote_sql_identifier(variant_col)) else "" # Return a canonical VARIANT field when available.
         
         if (isTRUE(isolate(input$use_groups_col))) { # Branch: derive groups by parsing GROUPS column.
           grp_col <- cols[toupper(cols) == "GROUPS"] # Locate the actual GROUPS column name (case-insensitive).
           if (length(grp_col) == 0) return(NULL) # Cannot parse groups if GROUPS column is absent.
-          query <- sprintf("SELECT STAND_ID, STAND_CN, %s AS GROUPS_RAW %s FROM %s", # Build SQL to fetch base stand data plus raw GROUPS.
-                           quote_sql_identifier(grp_col[1]), var_str, quote_sql_identifier(input$stand_tbl)) # Insert escaped identifiers safely.
+          query <- sprintf("SELECT %s, %s AS GROUPS_RAW %s FROM %s", # Build SQL with canonical stand/variant aliases plus raw GROUPS.
+                           stand_select, quote_sql_identifier(grp_col[1]), var_str, quote_sql_identifier(input$stand_tbl)) # Insert resolved and escaped identifiers safely.
           res <- dbGetQuery(con, query) # Execute stand query.
           target_key <- isolate(input$group_col) # Selected GROUPS key to extract (for example, RX).
           
@@ -460,8 +506,8 @@
           attr(res, "has_var") <- has_var # Preserve variant-presence metadata for downstream normalization.
           res # Return parsed stand-level result set.
         } else { # Branch: use selected column directly as GROUP_CODE.
-          query <- sprintf("SELECT STAND_ID, STAND_CN, %s AS GROUP_CODE %s FROM %s", # Build SQL to alias selected group column to GROUP_CODE.
-                           quote_sql_identifier(input$group_col), var_str, quote_sql_identifier(input$stand_tbl)) # Insert escaped identifiers safely.
+          query <- sprintf("SELECT %s, %s AS GROUP_CODE %s FROM %s", # Build SQL with canonical stand/variant aliases and selected GROUP_CODE.
+                           stand_select, quote_sql_identifier(input$group_col), var_str, quote_sql_identifier(input$stand_tbl)) # Insert resolved and escaped identifiers safely.
           res <- dbGetQuery(con, query) # Execute stand query.
           attr(res, "has_var") <- has_var # Preserve variant-presence metadata for downstream normalization.
           res # Return direct-column stand-level result set.
@@ -498,6 +544,31 @@
       showNotification(paste("Database Query Error:", e$message), type = "error", duration = 8) # Surface error details to the UI.
       return(NULL) # Fail gracefully so downstream reactives can block cleanly.
     })
+  })
+
+  get_execution_queue <- reactive({ # Derive the Step 2 workload without changing the full project queue.
+    job_queue <- get_job_queue()
+    if (is.null(job_queue) || nrow(job_queue) == 0 || !isTRUE(input$test_run_mode)) {
+      return(job_queue)
+    }
+
+    # Select the numerically lowest STAND_ID for every GROUP_CODE/Scenario pair
+    # so all configured KCP scenarios are represented in the test workload.
+    stand_id_text <- trimws(as.character(job_queue$STAND_ID))
+    stand_id_numeric <- suppressWarnings(as.numeric(stand_id_text))
+    stand_cn_sort <- if ("STAND_CN" %in% names(job_queue)) job_queue$STAND_CN else seq_len(nrow(job_queue))
+    queue_order <- order(
+      job_queue$GROUP_CODE,
+      job_queue$Scenario,
+      is.na(stand_id_numeric),
+      stand_id_numeric,
+      stand_id_text,
+      stand_cn_sort,
+      na.last = TRUE
+    )
+    ordered_queue <- job_queue[queue_order, , drop = FALSE]
+    sample_columns <- ordered_queue[, c("GROUP_CODE", "Scenario"), drop = FALSE]
+    ordered_queue[!duplicated(sample_columns), , drop = FALSE]
   })
   
   # --- SYSTEM SCANNING OBSERVER ---
@@ -747,23 +818,36 @@
         tryCatch({
           df_stand <- dbGetQuery(con, sprintf("SELECT rowid, %s FROM %s", quote_sql_identifier(grp_col_name), quote_sql_identifier(standalone_table)))
           
-          # Iterate through selected groups and repeatedly run the extraction function
-          merged_vals <- rep("", nrow(df_stand))
-          for (i in seq_along(groups)) {
-             g <- groups[i]
-             vals <- extract_group_values_vectorized(df_stand[[grp_col_name]], g)
-             vals[is.na(vals)] <- ""
-             if (i == 1) {
-               merged_vals <- vals
-             } else {
-               merged_vals <- paste(merged_vals, vals, sep = "_")
-             }
+          # Extract each selected GROUPS entry independently. Standalone tokens
+          # (for example All_FIA_Conditions) return their token, while entries
+          # such as BPS=110480 return 110480.
+          extracted_values <- vapply(
+            groups,
+            function(group_name) {
+              extract_group_values_vectorized(df_stand[[grp_col_name]], group_name)
+            },
+            character(nrow(df_stand))
+          )
+          if (length(groups) == 1) {
+            extracted_values <- matrix(extracted_values, ncol = 1)
           }
-          
-          # Clean up prefix/suffix underscores and convert true blanks back to NA
-          merged_vals <- gsub("^_|_$", "", merged_vals)
-          merged_vals <- gsub("_+", "_", merged_vals)
-          merged_vals[merged_vals == ""] <- NA_character_
+
+          # Populate the derived value only when every selected entry exists on
+          # that row. Missing tokens and explicit NULL/NA values remain NULL.
+          complete_rows <- apply(
+            extracted_values,
+            1,
+            function(values) all(!is.na(values) & nzchar(trimws(values)))
+          )
+          merged_vals <- rep(NA_character_, nrow(df_stand))
+          if (any(complete_rows)) {
+            merged_vals[complete_rows] <- apply(
+              extracted_values[complete_rows, , drop = FALSE],
+              1,
+              paste,
+              collapse = "_"
+            )
+          }
           
           dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN %s TEXT", quote_sql_identifier(standalone_table), quote_sql_identifier(new_col_name)))
           
@@ -773,9 +857,11 @@
           
           if (nrow(update_df) > 0) {
              sql_update <- sprintf("UPDATE %s SET %s = :new_val WHERE rowid = :row_id", quote_sql_identifier(standalone_table), quote_sql_identifier(new_col_name))
-             res <- dbSendStatement(con, sql_update)
-             dbBind(res, params = list(new_val = update_df$new_val, row_id = update_df$row_id))
-             dbClearResult(res)
+             dbExecute(
+              con,
+              sql_update,
+              params = list(new_val = update_df$new_val, row_id = update_df$row_id)
+             )
           }
           
           showNotification(sprintf("Successfully created merged column: %s", new_col_name), type = "message")
@@ -795,9 +881,16 @@
     
     showModal(modalDialog(
       title = "Auto-Populate Scenario Combinations",
-      p("Automatically generate dedicated scenario rows for every KCP file present in a selected folder. This cross-joins the checked combinations and adds them to the grid below."),
+      p("Select one or more KCP folders. Every available value across the selected folders will be cross-joined for each target group and added to the grid below."),
       selectizeInput("expand_groups", "Target Group(s) [Leave blank for ALL]:", choices = meta$groups, multiple = TRUE, width = "100%"),
-      selectInput("expand_folder", "Target KCP Folder (Type):", choices = meta$types, width = "100%"),
+      selectizeInput(
+        "expand_folders",
+        "Target KCP Folders (Types):",
+        choices = meta$types,
+        multiple = TRUE,
+        width = "100%",
+        options = list(placeholder = "Select one or more KCP folders")
+      ),
       footer = tagList(
         modalButton("Cancel"),
         actionButton("do_expand", "Generate Rows", class = "btn-success", icon = icon("check"))
@@ -816,17 +909,37 @@
     
     target_groups <- input$expand_groups
     if (length(target_groups) == 0) target_groups <- meta$groups # Empty implies all known groups
-    
-    target_folder <- input$expand_folder
-    
-    # Retrieve physically available KCP file names for this specific type directly from the catalog
-    kcp_vals <- meta$catalog$KCP_Name[meta$catalog$KCP_Type == target_folder & !is.na(meta$catalog$KCP_Name)]
-    
-    if (length(kcp_vals) == 0) {
-      showNotification(sprintf("No KCP files found in folder '%s'.", target_folder), type = "warning")
+
+    target_folders <- intersect(as.character(input$expand_folders), as.character(meta$types))
+    if (length(target_folders) == 0) {
+      showNotification("Select at least one KCP folder to generate combinations.", type = "warning")
+      return()
+    }
+
+    # Build one value vector per selected KCP folder, then calculate the full
+    # Cartesian product (for example, every Prescription x Timing pairing).
+    folder_values <- setNames(lapply(target_folders, function(folder_name) {
+      values <- meta$catalog$KCP_Name[
+        meta$catalog$KCP_Type == folder_name & !is.na(meta$catalog$KCP_Name)
+      ]
+      sort(unique(as.character(values[nzchar(trimws(as.character(values)))])))
+    }), target_folders)
+
+    empty_folders <- names(folder_values)[lengths(folder_values) == 0]
+    if (length(empty_folders) > 0) {
+      showNotification(
+        sprintf("No KCP files found in folder(s): %s.", paste(empty_folders, collapse = ", ")),
+        type = "warning"
+      )
       removeModal()
       return()
     }
+
+    kcp_combinations <- expand.grid(
+      folder_values,
+      KEEP.OUT.ATTRS = FALSE,
+      stringsAsFactors = FALSE
+    )
     
     # Build expanded row blocks for target groups
     expanded_rows <- lapply(target_groups, function(grp) {
@@ -839,8 +952,10 @@
         base_row$GROUP_CODE <- grp
       }
       
-      rep_df <- base_row[rep(1, length(kcp_vals)), , drop = FALSE]
-      rep_df[[target_folder]] <- kcp_vals
+      rep_df <- base_row[rep(1, nrow(kcp_combinations)), , drop = FALSE]
+      for (folder_name in target_folders) {
+        rep_df[[folder_name]] <- kcp_combinations[[folder_name]]
+      }
       rep_df
     })
     
@@ -852,8 +967,11 @@
     final_df <- final_df[order(final_df$GROUP_CODE), ]
     rownames(final_df) <- NULL
     
-    # Recalculate Scenario strings to accommodate the new populated rows
-    final_df <- recalculate_scenarios(final_df, scenario_cols = input$scenario_add_cols, force_auto = TRUE)
+    # Include all expanded folders in Scenario labels so each cross-product row
+    # has a unique, descriptive scenario name (for example Group_Rx_Timing).
+    scenario_cols <- unique(c(as.character(input$scenario_add_cols), target_folders))
+    updateSelectInput(session, "scenario_add_cols", selected = scenario_cols)
+    final_df <- recalculate_scenarios(final_df, scenario_cols = scenario_cols, force_auto = TRUE)
     
     grid_data(final_df)
     removeModal()
@@ -1055,13 +1173,15 @@
       return("Status: Blocked. Active 'KCP_AddFile_Manifest.csv' not found. Save matrix settings on Panel 2 first.") # Explain missing manifest prerequisite.
     }
     
-    jq <- get_job_queue() # Build joined stand/scenario queue for readiness checks.
-    if (is.null(jq)) { # Block when queue construction failed.
+    full_jq <- get_job_queue() # Build the complete joined stand/scenario queue for readiness checks.
+    if (is.null(full_jq)) { # Block when queue construction failed.
       return("Status: Blocked. Job queue query to the database failed. Check the red error notification in the corner (Are STAND_ID and STAND_CN columns present?).") # Show queue failure guidance.
     }
-    if (nrow(jq) == 0) { # Block when queue exists but no jobs matched.
+    if (nrow(full_jq) == 0) { # Block when queue exists but no jobs matched.
       return("Status: Blocked. Manifest file exists but exact GROUP_CODE cross-join with database targets returned 0 jobs.") # Explain zero-job join condition.
     }
+
+    jq <- get_execution_queue() # Apply the optional one-stand-per-group/scenario test filter.
     
     detected_variants <- if ("VARIANT" %in% names(jq)) { # Derive variant inventory only when column exists in queue.
       paste(unique(jq$VARIANT), collapse = ", ") # Build comma-delimited variant list for status text.
@@ -1069,9 +1189,10 @@
       "None Detected (Ensure VARIANT column exists in Database)" # Fallback message when variant metadata is unavailable.
     }
     
+    run_mode <- if (isTRUE(input$test_run_mode)) "TEST — first stand per GROUP_CODE/Scenario" else "FULL"
     sprintf( # Return success summary with queue size, cores, and variant inventory.
-      "Pipeline Status: Active Ready Queue\n - Master Database Found: %s\n - Cross-Join Stands Queue: %d active tasks\n - Cores: %d threads requested\n - Detected FVS Variants: %s (%d total)\n\n[Ready to dispatch parallel rFVS simulations.]", # Template for step-2 readiness diagnostics.
-      basename(full_db_path), nrow(jq), input$num_cores_rfvs, detected_variants, if ("VARIANT" %in% names(jq)) length(unique(jq$VARIANT)) else 0 # Populate summary with resolved values.
+      "Pipeline Status: Active Ready Queue\n - Master Database Found: %s\n - Execution Mode: %s\n - Full Cross-Join Queue: %d active tasks\n - Current Execution Queue: %d active tasks\n - Cores: %d threads requested\n - Detected FVS Variants: %s (%d total)\n\n[Ready to dispatch parallel rFVS simulations.]", # Template for step-2 readiness diagnostics.
+      basename(full_db_path), run_mode, nrow(full_jq), nrow(jq), input$num_cores_rfvs, detected_variants, if ("VARIANT" %in% names(jq)) length(unique(jq$VARIANT)) else 0 # Populate summary with resolved values.
     )
   })
   
@@ -1284,7 +1405,7 @@
     shinyjs::disable("run_rfvs") # Prevent duplicate launches while workers are active.
     step_start_run(Sys.time()) # Record start timestamp for elapsed-time reporting.
     
-    job_queue <- get_job_queue() # Resolve current execution targets from DB + manifest join.
+    job_queue <- get_execution_queue() # Resolve the full or sampled execution queue according to Step 2 test mode.
     if (is.null(job_queue) || nrow(job_queue) == 0) { # Block run when no executable stand records exist.
       shinyjs::enable("run_rfvs") # Re-enable launch button because nothing started.
       shinyjs::hide("kill_run_btn_wrap") # Ensure cancel control remains hidden.
@@ -1308,6 +1429,8 @@
     
     p_overwrite <- input$overwrite_scens # User-selected scenarios to force rerun/overwrite.
     if (is.null(p_overwrite)) p_overwrite <- character(0) # Normalize NULL input to empty character vector.
+    active_run_total(total_jobs) # Freeze the progress denominator for this background process.
+    active_run_is_test(isTRUE(input$test_run_mode)) # Freeze the mode label for completion reporting.
 
     shinyjs::show("kill_run_btn_wrap") # Show cancel button once background process starts.
     
@@ -1426,7 +1549,8 @@
         if (length(l) > 0) {
           parts <- strsplit(l[length(l)], "\\|")[[1]]
           if (length(parts) >= 2 && !is.null(run_prog)) {
-            val <- as.numeric(parts[1]) / nrow(isolate(get_job_queue()))
+            total_jobs <- isolate(active_run_total())
+            val <- if (!is.null(total_jobs) && total_jobs > 0) as.numeric(parts[1]) / total_jobs else 0
             run_prog$set(value = val, detail = paste(parts[-1], collapse="|"))
           }
         }
@@ -1442,8 +1566,9 @@
       updateActionButton(session, "kill_run_btn", label = "Cancel", icon = icon("xmark"))
       
       if (p$get_exit_status() == 0) {
+        completion_title <- if (isTRUE(active_run_is_test())) "Step 2 Test Complete: Sample Simulations Ran" else "Step 2 Complete: Simulations Ran"
         showModal(modalDialog(
-          title = "Step 2 Complete: Simulations Ran",
+          title = completion_title,
           p(sprintf("Successfully processed %s simulation binaries via worker clusters.", p$get_result())),
           p(sprintf("Elapsed Time: %s", elapsed_run)),
           easyClose = TRUE, footer = modalButton("Dismiss")
@@ -1455,6 +1580,8 @@
           p(paste(err, collapse = "\n")), easyClose = TRUE, footer = modalButton("Dismiss")
         ))
       }
+      active_run_total(NULL)
+      active_run_is_test(FALSE)
     }
   })
   
@@ -1466,6 +1593,8 @@
       if (!is.null(run_prog)) run_prog$close()
       run_prog <<- NULL
       step_start_run(NULL)
+      active_run_total(NULL)
+      active_run_is_test(FALSE)
       shinyjs::enable("run_rfvs")
       shinyjs::hide("kill_run_btn_wrap")
       updateActionButton(session, "kill_run_btn", label = "Cancel", icon = icon("xmark"))

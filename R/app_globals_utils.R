@@ -585,17 +585,34 @@ create_lookup_wb <- function(df_export, meta_info, scenario_cols = NULL) {
   addWorksheet(wb, "Lookup", gridLines = TRUE)
   addWorksheet(wb, "Options", gridLines = FALSE)
   
-  # Prevent group strings that contain numbers from incrementing automatically inside Excel by converting to numeric explicitly if valid.
-  numeric_group <- suppressWarnings(as.numeric(df_export$GROUP_CODE))
-  if (!any(is.na(numeric_group))) {
-    df_export$GROUP_CODE <- numeric_group
-  }
+  # Preserve GROUP_CODE as an identifier so leading zeros survive export.
+  df_export$GROUP_CODE <- as.character(df_export$GROUP_CODE)
   
   # Output the template structure layout into the primary mapped worksheet 
   writeDataTable(wb, sheet = "Lookup", x = df_export, tableName = "KCP_Lookup", withFilter = TRUE, tableStyle = "TableStyleMedium2")
   
   lookup_columns <- names(df_export)
   group_col_idx <- match("GROUP_CODE", lookup_columns)
+
+  # Replace populated group cells with constant text formulas (for example,
+  # ="01"). Because these formulas contain no relative references, dragging
+  # an initial cell copies its exact value instead of creating a number series.
+  if (!is.na(group_col_idx) && nrow(df_export) > 0) {
+    group_values <- df_export$GROUP_CODE
+    escaped_group_values <- gsub('"', '""', group_values, fixed = TRUE)
+    group_formulas <- ifelse(
+      is.na(group_values) | !nzchar(group_values),
+      '=""',
+      paste0('="', escaped_group_values, '"')
+    )
+    writeFormula(
+      wb,
+      sheet = "Lookup",
+      x = group_formulas,
+      startCol = group_col_idx,
+      startRow = 2
+    )
+  }
 
   # Resolve effective Scenario columns for workbook formulas.
   effective_scenario_cols <- intersect(as.character(scenario_cols), lookup_columns)
@@ -663,12 +680,13 @@ create_lookup_wb <- function(df_export, meta_info, scenario_cols = NULL) {
   }
   
   if (!is.na(group_col_idx)) {
+    group_values <- as.character(meta_info$groups)
     group_start <- options_row + 1
     writeData(wb, "Options", x = "GROUP_CODE", startCol = 1, startRow = group_start)
-    writeData(wb, "Options", x = data.frame(GROUP_CODE = meta_info$groups), startCol = 1, startRow = group_start + 1)
+    writeData(wb, "Options", x = data.frame(GROUP_CODE = group_values, stringsAsFactors = FALSE), startCol = 1, startRow = group_start + 1)
     
     dataValidation(wb, sheet = "Lookup", cols = group_col_idx, rows = 2:500, 
-                   type = "list", value = sprintf("'Options'!$A$%d:$A$%d", group_start + 2, group_start + 1 + length(meta_info$groups)), allowBlank = FALSE)
+                   type = "list", value = sprintf("'Options'!$A$%d:$A$%d", group_start + 2, group_start + 1 + length(group_values)), allowBlank = FALSE)
   }
   
   if (!is.null(meta_info$catalog)) {
@@ -695,27 +713,33 @@ def_cores <- max(1, floor(sys_cores / 4))
 #   - Returns a vector aligned to input rows.
 #   - Converts explicit NA-like strings (NA, <NA>, NULL, NONE) to NA.
 extract_group_values_vectorized <- function(vec, target_key) {
-  escaped_key <- gsub("([.|()\\\\^{}+$*?])", "\\\\\\1", target_key)
-  pat_eq <- sprintf("(?:^|\\s)%s=([^\\s]+)", escaped_key)
-  pat_alone <- sprintf("(?:^|\\s)(%s)(?:\\s|$)", escaped_key)
-  
-  m_alone <- regexpr(pat_alone, vec, perl=TRUE)
-  m_eq <- regexpr(pat_eq, vec, perl=TRUE)
-  
-  parsed_vals <- rep(NA_character_, length(vec))
-  parsed_vals[m_alone != -1] <- target_key
-  
-  idx_eq <- m_eq != -1
-  if (any(idx_eq)) {
-    starts <- attr(m_eq, "capture.start")[, 1]
-    lengths <- attr(m_eq, "capture.length")[, 1]
-    parsed_vals[idx_eq] <- substring(vec[idx_eq], starts[idx_eq], starts[idx_eq] + lengths[idx_eq] - 1)
-  }
-  
-  # Automatically remove explicit "NA" string values
-  parsed_vals[!is.na(parsed_vals) & toupper(trimws(parsed_vals)) %in% c("NA", "<NA>", "NULL", "NONE")] <- NA_character_
-  
-  return(parsed_vals)
+  target_key <- trimws(as.character(target_key)[1])
+  if (is.na(target_key) || !nzchar(target_key)) return(rep(NA_character_, length(vec)))
+
+  equal_prefix <- paste0(target_key, "=")
+  parsed_vals <- vapply(vec, function(raw_value) {
+    if (is.na(raw_value) || !nzchar(trimws(as.character(raw_value)))) return(NA_character_)
+
+    tokens <- strsplit(trimws(as.character(raw_value)), "\\s+")[[1]]
+    keyed_tokens <- tokens[startsWith(tokens, equal_prefix)]
+
+    # Prefer key=value when both forms appear in the same GROUPS string.
+    if (length(keyed_tokens) > 0) {
+      value <- substring(keyed_tokens[1], nchar(equal_prefix) + 1)
+    } else if (target_key %in% tokens) {
+      value <- target_key
+    } else {
+      return(NA_character_)
+    }
+
+    value <- trimws(value)
+    if (!nzchar(value) || toupper(value) %in% c("NA", "<NA>", "NULL", "NONE")) {
+      return(NA_character_)
+    }
+    value
+  }, character(1), USE.NAMES = FALSE)
+
+  parsed_vals
 }
 
 # Connects to SQLite DB and retrieves unique group strings, ignoring 'excluded_groups'
@@ -865,8 +889,9 @@ parse_groups_column_keys <- function(db_path, stand_tbl) {
   parts <- parts[nzchar(parts)]
   keys <- sub("=.*$", "", parts)
 
-  # Automatically filter out explicit "NA" standalone keys.
-  keys <- keys[keys != "NA"]
+  # Filter explicit null placeholders without removing real keys whose
+  # key=value entries may contain a null value on only some rows.
+  keys <- keys[!toupper(trimws(keys)) %in% c("NA", "<NA>", "NULL", "NONE")]
 
   sort(unique(keys))
 }
