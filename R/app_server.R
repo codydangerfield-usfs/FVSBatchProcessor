@@ -650,7 +650,12 @@
     df <- data.frame(GROUP_CODE = meta$groups, Scenario = "", stringsAsFactors = FALSE) # Seed lookup grid with one row per group.
     for (t in meta$types) { # Add one column per KCP type.
       type_rows <- meta$catalog[meta$catalog$KCP_Type == t & !is.na(meta$catalog$KCP_Name), ] # Gather available KCP names for this type.
-      df[[t]] <- if (t %in% c("Global", "Output") && nrow(type_rows) == 1) type_rows$KCP_Name[1] else "" # Pre-fill Global/Output defaults if only one kcp exists.
+      is_singleton_default_type <- grepl("global|outputs?", t, ignore.case = TRUE) # Recognize Global/Output folder roles without requiring an exact singular name.
+      df[[t]] <- if (is_singleton_default_type && nrow(type_rows) == 1) {
+        type_rows$KCP_Name[1] # Use the sole KCP regardless of its filename.
+      } else {
+        ""
+      }
     }
 
     # Allow scenario naming from any editable columns except reserved fields.
