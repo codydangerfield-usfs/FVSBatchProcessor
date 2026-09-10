@@ -248,6 +248,7 @@ ui <- function(request) {
         numericInput("num_cores_merge", paste0("Compute Cores (Parallel Consolidation - ", sys_cores, " Available)"), value = def_cores, min = 1, step = 1),
         hr(),
         p("Merge individual stand databases into Group/Scenario databases, and then combine them all into a single master database."),
+        hr(),
         actionButton("merge_outputs", "Consolidate Master Outputs", icon = icon("database"), class = "btn-primary w-100 mb-2"),
         div(
           id = "kill_merge_btn_wrap",
