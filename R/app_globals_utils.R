@@ -548,22 +548,131 @@ strip_missing_drawing_relationships <- function(xlsx_path) {
   tmp_dir <- tempfile("xlsx_clean_"); dir.create(tmp_dir); on.exit(unlink(tmp_dir, recursive = TRUE, force = TRUE), add = TRUE)
   unzip(xlsx_path, exdir = tmp_dir)
   rel_dir <- file.path(tmp_dir, "xl", "worksheets", "_rels")
-  if (!dir.exists(rel_dir)) return(invisible(TRUE))
-  rel_files <- list.files(rel_dir, pattern = "\\.rels$", full.names = TRUE)
-  for (rel_file in rel_files) {
-    rel_xml <- paste(readLines(rel_file, warn = FALSE), collapse = "")
-    rel_xml <- gsub('<Relationship[^>]+Type="[^"]+/drawing"[^>]+Target="\\.\\./drawings/drawing[0-9]+\\.xml"[^>]*/>', "", rel_xml)
-    rel_xml <- gsub('<Relationship[^>]+Type="[^"]+/vmlDrawing"[^>]+Target="\\.\\./drawings/vmlDrawing[0-9]+\\.vml"[^>]*/>', "", rel_xml)
-    writeLines(rel_xml, rel_file, useBytes = TRUE)
+  if (dir.exists(rel_dir)) {
+    rel_files <- list.files(rel_dir, pattern = "\\.rels$", full.names = TRUE)
+    for (rel_file in rel_files) {
+      rel_xml <- paste(readLines(rel_file, warn = FALSE), collapse = "")
+      rel_xml <- gsub('<Relationship[^>]+Type="[^"]+/drawing"[^>]+Target="\\.\\./drawings/drawing[0-9]+\\.xml"[^>]*/>', "", rel_xml)
+      rel_xml <- gsub('<Relationship[^>]+Type="[^"]+/vmlDrawing"[^>]+Target="\\.\\./drawings/vmlDrawing[0-9]+\\.vml"[^>]*/>', "", rel_xml)
+      writeLines(rel_xml, rel_file, useBytes = TRUE)
+    }
   }
   sheet_files <- list.files(file.path(tmp_dir, "xl", "worksheets"), pattern = "^sheet[0-9]+\\.xml$", full.names = TRUE)
   for (sheet_file in sheet_files) {
     sheet_xml <- paste(readLines(sheet_file, warn = FALSE), collapse = "")
     sheet_xml <- gsub('<drawing[^>]*/>', "", sheet_xml)
     sheet_xml <- gsub('<legacyDrawing[^>]*/>', "", sheet_xml)
+
+    # openxlsx writes formulas without cached results. Cache constant string
+    # formulas (for example, ="01") so protected-view and immediate re-upload
+    # workflows can read GROUP_CODE values before Excel recalculates the file.
+    worksheet_cells <- regmatches(
+      sheet_xml,
+      gregexpr("<c\\b[^>]*>.*?</c>", sheet_xml, perl = TRUE)
+    )[[1]]
+    formula_cells <- worksheet_cells[
+      grepl("<f(?:\\s[^>]*)?>.*?</f>", worksheet_cells, perl = TRUE)
+    ]
+    if (length(formula_cells) > 0) {
+      for (formula_cell in formula_cells) {
+        formula_xml <- sub("(?s).*?<f(?:\\s[^>]*)?>(.*?)</f>.*", "\\1", formula_cell, perl = TRUE)
+        formula_text <- gsub("&quot;", '"', formula_xml, fixed = TRUE)
+        formula_text <- gsub("&apos;", "'", formula_text, fixed = TRUE)
+        formula_text <- gsub("&lt;", "<", formula_text, fixed = TRUE)
+        formula_text <- gsub("&gt;", ">", formula_text, fixed = TRUE)
+        formula_text <- gsub("&amp;", "&", formula_text, fixed = TRUE)
+        formula_text <- sub("^=", "", trimws(formula_text))
+
+        if (grepl('^"(?:[^"]|"")*"$', formula_text, perl = TRUE)) {
+          cached_value <- substring(formula_text, 2L, nchar(formula_text) - 1L)
+          cached_value <- gsub('""', '"', cached_value, fixed = TRUE)
+          cached_xml <- gsub("&", "&amp;", cached_value, fixed = TRUE)
+          cached_xml <- gsub("<", "&lt;", cached_xml, fixed = TRUE)
+          cached_xml <- gsub(">", "&gt;", cached_xml, fixed = TRUE)
+
+          updated_cell <- if (grepl("<v(?:\\s[^>]*)?>.*?</v>", formula_cell, perl = TRUE)) {
+            sub("<v(?:\\s[^>]*)?>.*?</v>", paste0("<v>", cached_xml, "</v>"), formula_cell, perl = TRUE)
+          } else {
+            sub("</f>", paste0("</f><v>", cached_xml, "</v>"), formula_cell, fixed = TRUE)
+          }
+          updated_cell <- if (grepl('^<c\\b[^>]*\\bt="[^"]*"', updated_cell, perl = TRUE)) {
+            sub('(^<c\\b[^>]*\\b)t="[^"]*"', '\\1t="str"', updated_cell, perl = TRUE)
+          } else {
+            sub("^<c\\b([^>]*)>", '<c\\1 t="str">', updated_cell, perl = TRUE)
+          }
+          sheet_xml <- sub(formula_cell, updated_cell, sheet_xml, fixed = TRUE)
+        }
+      }
+    }
     writeLines(sheet_xml, sheet_file, useBytes = TRUE)
   }
   zip::zipr(zipfile = xlsx_path, files = list.files(tmp_dir, recursive = TRUE, all.files = TRUE, no.. = TRUE), root = tmp_dir, mode = "mirror")
+}
+
+# Reads constant text formulas such as ="01" directly from an xlsx worksheet.
+# This avoids depending on Excel's cached formula results, which are absent until
+# a downloaded workbook has been opened with editing enabled and recalculated.
+read_xlsx_constant_text_formulas <- function(xlsx_path, column_index, sheet_index = 1L) {
+  if (!file.exists(xlsx_path) || is.na(column_index) || column_index < 1) {
+    return(data.frame(excel_row = integer(0), value = character(0)))
+  }
+
+  sheet_path <- sprintf("xl/worksheets/sheet%d.xml", as.integer(sheet_index))
+  archive_files <- tryCatch(unzip(xlsx_path, list = TRUE)$Name, error = function(e) character(0))
+  if (!(sheet_path %in% archive_files)) {
+    return(data.frame(excel_row = integer(0), value = character(0)))
+  }
+
+  sheet_connection <- unz(xlsx_path, sheet_path, open = "rb")
+  on.exit(close(sheet_connection), add = TRUE)
+  sheet_xml <- paste(readLines(sheet_connection, warn = FALSE, encoding = "UTF-8"), collapse = "")
+
+  cell_matches <- regmatches(
+    sheet_xml,
+    gregexpr("<c\\b[^>]*>.*?</c>", sheet_xml, perl = TRUE)
+  )[[1]]
+  if (length(cell_matches) == 0 || identical(cell_matches, character(0))) {
+    return(data.frame(excel_row = integer(0), value = character(0)))
+  }
+
+  has_reference <- grepl('\\br="[A-Z]+[0-9]+"', cell_matches, perl = TRUE)
+  has_formula <- grepl("<f(?:\\s[^>]*)?>.*?</f>", cell_matches, perl = TRUE)
+  cell_matches <- cell_matches[has_reference & has_formula]
+  if (length(cell_matches) == 0) {
+    return(data.frame(excel_row = integer(0), value = character(0)))
+  }
+
+  references <- sub('.*?\\br="([A-Z]+[0-9]+)".*', "\\1", cell_matches, perl = TRUE)
+  target_column <- openxlsx::int2col(as.integer(column_index))
+  target_cells <- sub("[0-9]+$", "", references) == target_column
+  cell_matches <- cell_matches[target_cells]
+  references <- references[target_cells]
+  if (length(cell_matches) == 0) {
+    return(data.frame(excel_row = integer(0), value = character(0)))
+  }
+
+  formulas <- sub(".*?<f(?:\\s[^>]*)?>(.*?)</f>.*", "\\1", cell_matches, perl = TRUE)
+  formulas <- gsub("&quot;", '"', formulas, fixed = TRUE)
+  formulas <- gsub("&apos;", "'", formulas, fixed = TRUE)
+  formulas <- gsub("&lt;", "<", formulas, fixed = TRUE)
+  formulas <- gsub("&gt;", ">", formulas, fixed = TRUE)
+  formulas <- gsub("&amp;", "&", formulas, fixed = TRUE)
+  formulas <- sub("^=", "", trimws(formulas))
+
+  is_constant_text <- grepl('^"(?:[^"]|"")*"$', formulas, perl = TRUE)
+  formulas <- formulas[is_constant_text]
+  references <- references[is_constant_text]
+  if (length(formulas) == 0) {
+    return(data.frame(excel_row = integer(0), value = character(0)))
+  }
+
+  values <- substring(formulas, 2L, nchar(formulas) - 1L)
+  values <- gsub('""', '"', values, fixed = TRUE)
+  data.frame(
+    excel_row = as.integer(sub("^[A-Z]+", "", references)),
+    value = values,
+    stringsAsFactors = FALSE
+  )
 }
 
 # Function to construct a formatted Excel workbook with predefined drop-down options for mapped KCP scenarios

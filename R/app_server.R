@@ -1001,11 +1001,44 @@
       uploaded_df <- if (tolower(ext) == "csv") { # Branch for CSV input.
         read.csv(file_info$datapath, stringsAsFactors = FALSE, check.names = FALSE) # Read CSV without factor conversion and preserve headers.
       } else {
-        read.xlsx(file_info$datapath, sheet = 1) # Read first worksheet for Excel uploads.
+        read.xlsx(
+          file_info$datapath,
+          sheet = 1,
+          skipEmptyRows = FALSE,
+          check.names = FALSE
+        ) # Keep worksheet row positions so uncached constant formulas can be restored reliably.
       }
       
       if (!("GROUP_CODE" %in% names(uploaded_df))) { # Validate required grouping key column exists.
         stop("The uploaded spreadsheet is missing the required 'GROUP_CODE' header column.") # Stop import when required schema is missing.
+      }
+
+      # Newly downloaded workbooks may not yet have cached Excel formula values.
+      # Recover constant GROUP_CODE formulas such as ="01" directly from xlsx XML
+      # so users can immediately re-upload a file without opening it in Excel.
+      if (tolower(ext) %in% c("xlsx", "xlsm")) {
+        group_col_index <- match("GROUP_CODE", names(uploaded_df))
+        formula_groups <- read_xlsx_constant_text_formulas(
+          file_info$datapath,
+          column_index = group_col_index,
+          sheet_index = 1L
+        )
+        if (nrow(formula_groups) > 0) {
+          data_rows <- formula_groups$excel_row - 1L # Worksheet row 1 contains headers.
+          valid_formula_rows <- data_rows >= 1L
+          data_rows <- data_rows[valid_formula_rows]
+          formula_values <- formula_groups$value[valid_formula_rows]
+
+          if (length(data_rows) > 0) {
+            required_rows <- max(data_rows)
+            if (nrow(uploaded_df) < required_rows) {
+              uploaded_df[seq.int(nrow(uploaded_df) + 1L, required_rows), ] <- NA
+            }
+            current_groups <- trimws(as.character(uploaded_df$GROUP_CODE[data_rows]))
+            restore_rows <- is.na(current_groups) | !nzchar(current_groups)
+            uploaded_df$GROUP_CODE[data_rows[restore_rows]] <- formula_values[restore_rows]
+          }
+        }
       }
       
       if (!is.null(meta$types)) { # Ensure all expected KCP type columns exist in imported data.
@@ -1013,6 +1046,18 @@
           if (!(t %in% names(uploaded_df))) uploaded_df[[t]] <- "" # Add missing type columns as blank strings.
         }
       }
+
+      uploaded_df$GROUP_CODE <- trimws(as.character(uploaded_df$GROUP_CODE)) # Normalize GROUP_CODE values before filtering.
+      valid_group_rows <- !is.na(uploaded_df$GROUP_CODE) & nzchar(uploaded_df$GROUP_CODE)
+      if (!any(valid_group_rows)) {
+        stop(
+          paste(
+            "The uploaded spreadsheet contains no populated GROUP_CODE values.",
+            "The existing KCP Lookup grid was left unchanged."
+          )
+        )
+      }
+      uploaded_df <- uploaded_df[valid_group_rows, , drop = FALSE] # Remove only individual blank rows after validating the workbook.
 
       # Keep scenario selector aligned with imported structure.
       scenario_col_choices <- setdiff(names(uploaded_df), c("GROUP_CODE", "Scenario")) # Derive selectable scenario-suffix columns from imported headers.
@@ -1022,8 +1067,6 @@
       freezeReactiveValue(input, "scenario_add_cols") # Prevent programmatic selector updates from triggering forced Scenario regeneration.
       updateSelectInput(session, "scenario_add_cols", choices = scenario_col_choices, selected = selected_cols) # Refresh scenario suffix selector with imported column set.
       
-      uploaded_df$GROUP_CODE <- trimws(as.character(uploaded_df$GROUP_CODE)) # Normalize GROUP_CODE values before filtering.
-      uploaded_df <- uploaded_df[uploaded_df$GROUP_CODE != "" & !is.na(uploaded_df$GROUP_CODE), ] # Remove blank or missing GROUP_CODE rows.
       prior_uploaded_df <- if ("Scenario" %in% names(uploaded_df)) uploaded_df else NULL # Keep uploaded Scenario labels as preservation baseline when available.
       uploaded_df <- recalculate_scenarios(uploaded_df, old_df = prior_uploaded_df, scenario_cols = selected_cols, force_auto = FALSE) # Preserve uploaded Scenario labels; only auto-fill blanks from current suffix rules.
       
