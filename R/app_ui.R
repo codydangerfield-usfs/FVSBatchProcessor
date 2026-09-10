@@ -223,12 +223,18 @@ ui <- function(request) {
         hr(),
         h5("Execution Workflow"),
         selectInput("overwrite_scens", "Force Overwrite Specific Scenarios:", choices = NULL, multiple = TRUE),
-        checkboxInput(
-          "test_run_mode",
-          "Test mode: Run first stand in each group/scenario",
-          value = FALSE
+        div(
+          checkboxInput(
+            "test_run_mode",
+            "Test mode: Run first stand in each group/scenario",
+            value = FALSE
+          ),
+          div(
+            style = "margin-top: -10px;",
+            helpText("Uses one stand/keyfile per GROUP_CODE and Scenario. Overwrite selections still apply.")
+          )
         ),
-        helpText("Uses one deterministic stand/keyfile per GROUP_CODE and Scenario. Overwrite selections still apply."),
+        hr(),
         actionButton("run_rfvs", "Execute Parallel rFVS Engine", icon = icon("play"), class = "btn-primary w-100 mb-2"),
         div(
           id = "kill_run_btn_wrap",
