@@ -204,7 +204,17 @@ ui <- function(request) {
         numericInput("num_cores", paste0("Compute Cores (Parallel Generation - ", sys_cores, " Available)"), value = def_cores, min = 1, step = 1),
         numericInput("num_cycles", "Simulation Cycles Count", value = 10, min = 1, step = 1),
         numericInput("time_int", "Cycle Time Interval (Years)", value = 10, min = 1, step = 1),
-        numericInput("inv_year", "Inventory Baseline Start Year", value = 2024, min = 1900, step = 1),
+        numericInput("inv_year", "Common Simulation Start Year", value = 2024, min = 1900, step = 1),
+        radioButtons(
+          "inv_year_mode",
+          "Inventory Year Handling",
+          choices = c(
+            "Reset each stand to the common start year" = "reset",
+            "Preserve each stand's InvYear and grow to the common start year" = "grow"
+          ),
+          selected = "reset"
+        ),
+        helpText("The common start year defaults to the latest InvYear in the selected stand table."),
         hr(),
         actionButton("gen_keyfiles", "Generate Stand Keyfiles", icon = icon("cogs"), class = "btn-primary w-100 mb-2"),
         div(
