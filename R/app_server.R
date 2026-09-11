@@ -345,7 +345,7 @@
                 quote_sql_identifier(input$stand_tbl),
                 quote_sql_identifier(inv_year_col),
                 quote_sql_identifier(inv_year_col)
-              ) # Select the numerically latest valid inventory year rather than the most frequent value.
+              ) # Use the latest stand inventory year as the safe common-year default.
               inv_df <- dbGetQuery(con, inv_query) # Execute INV_YEAR lookup query.
               if (nrow(inv_df) > 0) { # Update only when a candidate value was returned.
                 inv_val <- suppressWarnings(as.numeric(inv_df$INV_YEAR[1])) # Safely coerce to numeric.
@@ -456,9 +456,6 @@
   
   # Retrieves job queue payload connecting active inputs, user manifests and physical directories
   get_job_queue <- reactive({ # Build the runnable stand-level queue from DB + manifest inputs.
-    # Establish a reactive dependency on the save button so it re-evaluates when the user updates the manifest
-    input$save_matrix # Depend on save clicks so queue refreshes after matrix changes.
-    
     # To prevent reactive race conditions between file writing and UI updates
     # we explicitly wait for this trigger (fired only AFTER the file finishes saving)
     manifest_trigger() # Depend on explicit post-write trigger to avoid reading partial files.
@@ -486,6 +483,7 @@
         stand_id_col <- cols[toupper(cols) == "STAND_ID"][1]
         stand_cn_col <- cols[toupper(cols) == "STAND_CN"][1]
         variant_col <- cols[toupper(cols) == "VARIANT"][1]
+        inv_year_col <- cols[toupper(cols) == "INV_YEAR"][1]
 
         if (is.na(stand_id_col) || is.na(stand_cn_col)) { # Fail with a clear schema error only when the required fields are genuinely absent.
           missing_cols <- c("STAND_ID", "STAND_CN")[c(is.na(stand_id_col), is.na(stand_cn_col))]
@@ -499,12 +497,13 @@
         ) # Canonical aliases isolate all downstream R code from database column-name casing.
         has_var <- !is.na(variant_col) # Detect VARIANT using the case-insensitive physical-name lookup.
         var_str <- if (has_var) sprintf(", %s AS VARIANT", quote_sql_identifier(variant_col)) else "" # Return a canonical VARIANT field when available.
+        inv_year_str <- if (!is.na(inv_year_col)) sprintf(", %s AS INV_YEAR", quote_sql_identifier(inv_year_col)) else "" # Carry each stand's database inventory year for optional pre-growth timing.
         
         if (isTRUE(isolate(input$use_groups_col))) { # Branch: derive groups by parsing GROUPS column.
           grp_col <- cols[toupper(cols) == "GROUPS"] # Locate the actual GROUPS column name (case-insensitive).
           if (length(grp_col) == 0) return(NULL) # Cannot parse groups if GROUPS column is absent.
-          query <- sprintf("SELECT %s, %s AS GROUPS_RAW %s FROM %s", # Build SQL with canonical stand/variant aliases plus raw GROUPS.
-                           stand_select, quote_sql_identifier(grp_col[1]), var_str, quote_sql_identifier(input$stand_tbl)) # Insert resolved and escaped identifiers safely.
+          query <- sprintf("SELECT %s, %s AS GROUPS_RAW %s %s FROM %s", # Build SQL with canonical stand/variant/inventory-year aliases plus raw GROUPS.
+                           stand_select, quote_sql_identifier(grp_col[1]), var_str, inv_year_str, quote_sql_identifier(input$stand_tbl)) # Insert resolved and escaped identifiers safely.
           res <- dbGetQuery(con, query) # Execute stand query.
           target_key <- isolate(input$group_col) # Selected GROUPS key to extract (for example, RX).
           
@@ -513,8 +512,8 @@
           attr(res, "has_var") <- has_var # Preserve variant-presence metadata for downstream normalization.
           res # Return parsed stand-level result set.
         } else { # Branch: use selected column directly as GROUP_CODE.
-          query <- sprintf("SELECT %s, %s AS GROUP_CODE %s FROM %s", # Build SQL with canonical stand/variant aliases and selected GROUP_CODE.
-                           stand_select, quote_sql_identifier(input$group_col), var_str, quote_sql_identifier(input$stand_tbl)) # Insert resolved and escaped identifiers safely.
+          query <- sprintf("SELECT %s, %s AS GROUP_CODE %s %s FROM %s", # Build SQL with canonical stand/variant/inventory-year aliases and selected GROUP_CODE.
+                           stand_select, quote_sql_identifier(input$group_col), var_str, inv_year_str, quote_sql_identifier(input$stand_tbl)) # Insert resolved and escaped identifiers safely.
           res <- dbGetQuery(con, query) # Execute stand query.
           attr(res, "has_var") <- has_var # Preserve variant-presence metadata for downstream normalization.
           res # Return direct-column stand-level result set.
@@ -620,17 +619,51 @@
         local({ # Keep DB connection scoped to this block.
           con_m <- dbConnect(SQLite(), full_db_path) # Open metadata DB connection.
           on.exit(try(dbDisconnect(con_m), silent = TRUE), add = TRUE) # Ensure DB connection closes on exit.
+
+          create_fvs_lookup_indexes <- function(con, table_name) { # Validate an FVS input table and create indexes using its physical column names.
+            if (!dbExistsTable(con, table_name)) { # Fail clearly if a discovered or selected table disappeared before indexing.
+              stop(sprintf("Cannot create indexes: table '%s' does not exist.", table_name))
+            }
+
+            physical_columns <- dbListFields(con, table_name) # Read exact database spelling, including legacy mixed-case names.
+            required_columns <- c("STAND_CN", "STAND_ID") # Both lookup columns are required for indexed FVS stand/tree access.
+            physical_matches <- vapply(required_columns, function(required_name) {
+              matches <- physical_columns[toupper(physical_columns) == required_name] # Match canonical names without assuming physical casing.
+              if (length(matches) == 0) NA_character_ else matches[1]
+            }, character(1))
+
+            missing_columns <- required_columns[is.na(physical_matches)] # Validate before issuing any CREATE INDEX statements.
+            if (length(missing_columns) > 0) {
+              stop(sprintf(
+                "Cannot index table '%s': required column(s) missing: %s.",
+                table_name,
+                paste(missing_columns, collapse = ", ")
+              ))
+            }
+
+            for (column_name in required_columns) { # Create one safely quoted index for each validated lookup column.
+              physical_column <- unname(physical_matches[[column_name]])
+              index_name <- sprintf("idx_%s_%s", table_name, tolower(column_name))
+              dbExecute(
+                con,
+                sprintf(
+                  "CREATE INDEX IF NOT EXISTS %s ON %s (%s)",
+                  quote_sql_identifier(index_name),
+                  quote_sql_identifier(table_name),
+                  quote_sql_identifier(physical_column)
+                )
+              )
+            }
+          }
           
-        # Build indexes on the Stand Init table
-          try(dbExecute(con_m, sprintf("CREATE INDEX IF NOT EXISTS idx_%s_cn ON %s (STAND_CN)", input$stand_tbl, quote_sql_identifier(input$stand_tbl))), silent = TRUE) # Create STAND_CN index to improve stand lookups.
-          try(dbExecute(con_m, sprintf("CREATE INDEX IF NOT EXISTS idx_%s_id ON %s (STAND_ID)", input$stand_tbl, quote_sql_identifier(input$stand_tbl))), silent = TRUE) # Create STAND_ID index to improve stand lookups.
+          # Build validated indexes on the selected Stand Init table.
+          create_fvs_lookup_indexes(con_m, input$stand_tbl)
           
           # Build indexes on any matching Tree Init tables
           tree_tbl_candidates <- dbGetQuery(con_m, "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%treeinit%'") # Find tree-init tables for index creation.
           if (nrow(tree_tbl_candidates) > 0) { # Only iterate when tree-init tables are present.
             for (t_tbl in tree_tbl_candidates$name) { # Create the same indexes for each tree-init table.
-              try(dbExecute(con_m, sprintf("CREATE INDEX IF NOT EXISTS idx_%s_cn ON %s (STAND_CN)", t_tbl, quote_sql_identifier(t_tbl))), silent = TRUE) # Index tree table by STAND_CN.
-              try(dbExecute(con_m, sprintf("CREATE INDEX IF NOT EXISTS idx_%s_id ON %s (STAND_ID)", t_tbl, quote_sql_identifier(t_tbl))), silent = TRUE) # Index tree table by STAND_ID.
+              create_fvs_lookup_indexes(con_m, t_tbl) # Validate schema and surface any indexing failure through the outer handler.
             }
           }
         })
@@ -1288,7 +1321,8 @@
     }
     
     keyfile_db_path <- resolve_db_path(input$root_dir, input$master_db, slash = "\\") # Resolve Windows-style DB path inserted into keyfiles.
-    p_inv_year   <- input$inv_year # Snapshot current inventory year setting.
+    p_inv_year   <- as.integer(input$inv_year) # Snapshot the requested common simulation start year.
+    p_inv_year_mode <- input$inv_year_mode # Snapshot whether to reset InvYear or preserve it and add pre-growth cycles.
     p_time_int   <- input$time_int # Snapshot cycle interval setting.
     p_num_cycles <- input$num_cycles # Snapshot total cycle count setting.
     p_cores      <- input$num_cores # Snapshot requested worker core count.
@@ -1296,6 +1330,28 @@
     
     p_stand_tbl  <- input$stand_tbl # Source stand table.
     p_tree_tbl   <- gsub("StandInit", "TreeInit", p_stand_tbl, ignore.case = TRUE) # Derive paired tree table.
+
+    if (isTRUE(identical(p_inv_year_mode, "grow"))) { # Pre-growth requires a valid inventory year for every queued stand.
+      if (!("INV_YEAR" %in% names(job_queue))) {
+        shinyjs::enable("gen_keyfiles")
+        step_start_gen(NULL)
+        showNotification("Cannot preserve and grow inventory years: the selected stand table has no INV_YEAR column.", type = "error", duration = 8)
+        return()
+      }
+      stand_inv_years <- suppressWarnings(as.integer(job_queue$INV_YEAR))
+      if (any(is.na(stand_inv_years))) {
+        shinyjs::enable("gen_keyfiles")
+        step_start_gen(NULL)
+        showNotification("Cannot preserve and grow inventory years: one or more queued stands have a missing or invalid INV_YEAR.", type = "error", duration = 8)
+        return()
+      }
+      if (any(stand_inv_years > p_inv_year)) {
+        shinyjs::enable("gen_keyfiles")
+        step_start_gen(NULL)
+        showNotification(sprintf("Common start year must be at least %d, the latest INV_YEAR in the active queue.", max(stand_inv_years)), type = "error", duration = 8)
+        return()
+      }
+    }
     
     unique_scenarios <- unique(job_queue$Scenario) # Build stable scenario index for MgmtId assignment.
     total_jobs <- nrow(job_queue) # Total stands to process in parallel loop.
@@ -1306,7 +1362,7 @@
     gen_prog <<- shiny::Progress$new(session, min=0, max=1) # Open modal progress bar for this step.
     gen_prog$set(message = "Executing : Building Stand Keyfiles...", value=0, detail = "Booting up compute cluster (this may take a moment)...") # Initialize user-facing progress text.
     
-    p <- callr::r_bg(function(job_queue, p_cores, p_stand_tbl, p_tree_tbl, p_inv_year, p_time_int, p_num_cycles, keyfile_db_path, prog_file, unique_scenarios, total_jobs) { # Fork a background R session so Shiny stays responsive.
+    p <- callr::r_bg(function(job_queue, p_cores, p_stand_tbl, p_tree_tbl, p_inv_year, p_inv_year_mode, p_time_int, p_num_cycles, keyfile_db_path, prog_file, unique_scenarios, total_jobs) { # Fork a background R session so Shiny stays responsive.
       library(parallel) # Provides PSOCK cluster workers.
       library(doSNOW) # Registers foreach backend with progress callback support.
       library(uuid) # Generates run UUID headers for keyfiles.
@@ -1317,7 +1373,7 @@
       
       last_update <- Sys.time() # Throttle progress-file writes to avoid excessive disk churn.
       progress_callback <- function(n) { # Called by doSNOW after completed loop iterations.
-        if (as.numeric(difftime(Sys.time(), last_update, units="secs")) > 0.1 || n == total_jobs) { # Emit update every ~0.1s or at completion.
+        if (as.numeric(difftime(Sys.time(), last_update, units="secs")) > 0.5 || n == total_jobs) { # Emit update every ~0.5s or at completion.
           writeLines(sprintf("%d|Processed %d of %d keyfiles...", n, n, total_jobs), prog_file) # Persist machine-readable progress for UI poller.
           last_update <<- Sys.time() # Reset throttle timer after write.
         }
@@ -1360,6 +1416,43 @@
                   }
                 }
                 stack_block <- c(stack_block, "*-----------------------------------------------*") # Close stack comment block.
+
+                # In preserve/grow mode, retain the stand's database InvYear and
+                # insert any bridge cycles needed to reach the common start year.
+                # The requested number of regular cycles begins only after that year.
+                timing_keywords <- if (identical(p_inv_year_mode, "grow")) {
+                  stand_inv_year <- as.integer(job_queue$INV_YEAR[i])
+                  bridge_years <- seq(stand_inv_year, p_inv_year, by = p_time_int)
+                  regular_years <- seq(p_inv_year, p_inv_year + p_num_cycles * p_time_int, by = p_time_int)
+                  cycle_years <- sort(unique(c(bridge_years, p_inv_year, regular_years)))
+                  cycle_intervals <- diff(cycle_years)
+                  interval_overrides <- vapply(
+                    which(cycle_intervals != p_time_int),
+                    function(cycle_index) sprintf("TimeInt  %10d%10d", cycle_index, cycle_intervals[cycle_index]),
+                    character(1)
+                  )
+                  c(
+                    paste0("TimeInt                   ", p_time_int),
+                    interval_overrides,
+                    paste0("NumCycle     ", length(cycle_intervals))
+                  )
+                } else {
+                  c(
+                    paste0("TimeInt                   ", p_time_int),
+                    paste0("NumCycle     ", p_num_cycles)
+                  )
+                }
+
+                database_keywords <- c(
+                  "Database",
+                  "DSNin", keyfile_db_path,
+                  "StandSQL", paste0("SELECT * FROM ", p_stand_tbl, " WHERE STAND_ID = '", stand_id, "'"), "EndSQL",
+                  "TreeSQL",  paste0("SELECT * FROM ", p_tree_tbl, " WHERE STAND_ID = '", stand_id, "'"), "EndSQL",
+                  "End"
+                )
+                if (identical(p_inv_year_mode, "reset")) {
+                  database_keywords <- c(database_keywords, paste0("InvYear       ", p_inv_year)) # Override the value loaded from the database without modifying the source table.
+                }
                 
                 kw_content <- c( # Assemble final run.key content in expected FVS keyword order.
                   paste0("!!title: ", run_name, "_", stand_id),
@@ -1371,19 +1464,11 @@
                   stand_cn,
                   "MgmtId",
                   mgmt_id,
-                  paste0("InvYear       ", p_inv_year),
-                  paste0("TimeInt                   ", p_time_int), 
-                  paste0("NumCycle     ", p_num_cycles),
+                  timing_keywords,
                   "",
                   stack_block,
                   "",
-                  "Database", 
-                  "DSNin", keyfile_db_path, 
-                  "StandSQL", paste0("SELECT * FROM ", p_stand_tbl, " WHERE STAND_ID = '", stand_id, "'"), "EndSQL",
-                  "TreeSQL",  paste0("SELECT * FROM ", p_tree_tbl, " WHERE STAND_ID = '", stand_id, "'"), "EndSQL",
-                  "End",
-                  "",
-                  
+                  database_keywords,
                   "",
                   "Process",
                   "Stop"
@@ -1393,7 +1478,7 @@
                 return(TRUE) # Mark this iteration as successful.
               }
       return(total_jobs) # Return processed count to parent process on successful completion.
-    }, args = list(job_queue, p_cores, p_stand_tbl, p_tree_tbl, p_inv_year, p_time_int, p_num_cycles, keyfile_db_path, prog_file_gen, unique_scenarios, total_jobs), supervise = TRUE) # Pass immutable args into background scope with supervision enabled.
+    }, args = list(job_queue, p_cores, p_stand_tbl, p_tree_tbl, p_inv_year, p_inv_year_mode, p_time_int, p_num_cycles, keyfile_db_path, prog_file_gen, unique_scenarios, total_jobs), supervise = TRUE) # Pass immutable args into background scope with supervision enabled.
     
     bg_gen(p) # Store process handle for progress polling, cancellation, and completion handling.
   })
@@ -1401,7 +1486,7 @@
   observe({ # Poll Step 1 background process state and keep progress UI synchronized.
     p <- bg_gen() # Retrieve active keyfile-generation process handle.
     req(p) # Run this observer only while a process handle exists.
-    invalidateLater(100, session) # Re-check process/progress every 100 ms.
+    invalidateLater(500, session) # Re-check process/progress every 500 ms.
     
     if (p$is_alive()) { # Live branch: background process is still running.
       shinyjs::show("kill_gen_btn_wrap") # Keep cancel control visible during execution.
