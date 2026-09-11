@@ -1,4 +1,4 @@
-﻿server <- function(input, output, session) {
+server <- function(input, output, session) {
   
   bg_gen <- reactiveVal(NULL) # Holds Step 1 background process handle (`callr::r_bg` object).
   bg_run <- reactiveVal(NULL) # Holds Step 2 background process handle.
@@ -33,8 +33,8 @@
     workload <- match.arg(workload)
     total_tasks <- suppressWarnings(as.integer(total_tasks))
     requested_cores <- suppressWarnings(as.integer(requested_cores))
-    if (is.na(total_tasks) || total_tasks < 1L) return(1L)
-    if (is.na(requested_cores) || requested_cores < 1L) requested_cores <- 1L
+    if (length(total_tasks) != 1L || is.na(total_tasks) || total_tasks < 1L) return(1L)
+    if (length(requested_cores) != 1L || is.na(requested_cores) || requested_cores < 1L) requested_cores <- 1L
 
     useful_limit <- min(total_tasks, requested_cores) # Never provision more workers than tasks or the user's selected limit.
     if (useful_limit <= 1L || identical(workload, "heavy")) return(as.integer(useful_limit)) # Expensive rFVS tasks benefit from every useful worker.
@@ -677,13 +677,15 @@
           # Build validated indexes on the selected Stand Init table.
           create_fvs_lookup_indexes(con_m, input$stand_tbl)
           
-          # Build indexes on any matching Tree Init tables
-          tree_tbl_candidates <- dbGetQuery(con_m, "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%treeinit%'") # Find tree-init tables for index creation.
-          if (nrow(tree_tbl_candidates) > 0) { # Only iterate when tree-init tables are present.
-            for (t_tbl in tree_tbl_candidates$name) { # Create the same indexes for each tree-init table.
-              create_fvs_lookup_indexes(con_m, t_tbl) # Validate schema and surface any indexing failure through the outer handler.
-            }
+          # Index only the conventionally paired TreeInit table. Unrelated
+          # TreeInit tables must not block metadata loading for this selection.
+          expected_tree_tbl <- gsub("StandInit", "TreeInit", input$stand_tbl, ignore.case = TRUE)
+          physical_tables <- dbListTables(con_m)
+          tree_tbl_match <- physical_tables[toupper(physical_tables) == toupper(expected_tree_tbl)]
+          if (length(tree_tbl_match) == 0L) {
+            stop(sprintf("Expected paired TreeInit table '%s' does not exist.", expected_tree_tbl))
           }
+          create_fvs_lookup_indexes(con_m, tree_tbl_match[1]) # Validate and index the exact expected partner using its physical spelling.
         })
         
         meta$groups <- get_groups_from_db(full_db_path, input$stand_tbl, input$group_col, ex_groups, isolate(input$use_groups_col)) # Load available groups for selected grouping mode.
@@ -1349,7 +1351,42 @@
     if (is.na(p_cores) || p_cores < 1) p_cores <- 1 # Clamp to at least one worker.
     
     p_stand_tbl  <- input$stand_tbl # Source stand table.
-    p_tree_tbl   <- gsub("StandInit", "TreeInit", p_stand_tbl, ignore.case = TRUE) # Derive paired tree table.
+    expected_tree_tbl <- gsub("StandInit", "TreeInit", p_stand_tbl, ignore.case = TRUE) # Derive the required convention-based tree-table name.
+    key_sql_schema <- tryCatch({ # Resolve exact physical names before any workers or output directories are started.
+      con_key <- dbConnect(SQLite(), resolve_db_path(input$root_dir, input$master_db))
+      on.exit(try(dbDisconnect(con_key), silent = TRUE), add = TRUE)
+      physical_tables <- dbListTables(con_key)
+      stand_match <- physical_tables[toupper(physical_tables) == toupper(p_stand_tbl)]
+      tree_match <- physical_tables[toupper(physical_tables) == toupper(expected_tree_tbl)]
+      if (length(stand_match) == 0L) stop(sprintf("Selected StandInit table '%s' does not exist.", p_stand_tbl))
+      if (length(tree_match) == 0L) stop(sprintf("Expected paired TreeInit table '%s' does not exist.", expected_tree_tbl))
+
+      physical_stand_tbl <- stand_match[1]
+      physical_tree_tbl <- tree_match[1]
+      stand_columns <- dbListFields(con_key, physical_stand_tbl)
+      tree_columns <- dbListFields(con_key, physical_tree_tbl)
+      stand_id_column <- stand_columns[toupper(stand_columns) == "STAND_ID"]
+      tree_id_column <- tree_columns[toupper(tree_columns) == "STAND_ID"]
+      if (length(stand_id_column) == 0L) stop(sprintf("StandInit table '%s' is missing STAND_ID.", physical_stand_tbl))
+      if (length(tree_id_column) == 0L) stop(sprintf("TreeInit table '%s' is missing STAND_ID.", physical_tree_tbl))
+
+      list(
+        stand_table = quote_sql_identifier(physical_stand_tbl),
+        tree_table = quote_sql_identifier(physical_tree_tbl),
+        stand_id = quote_sql_identifier(stand_id_column[1]),
+        tree_id = quote_sql_identifier(tree_id_column[1])
+      )
+    }, error = function(e) e)
+    if (inherits(key_sql_schema, "error")) {
+      shinyjs::enable("gen_keyfiles")
+      step_start_gen(NULL)
+      showNotification(paste("Cannot generate keyfiles:", key_sql_schema$message), type = "error", duration = 10)
+      return()
+    }
+    p_stand_tbl_sql <- key_sql_schema$stand_table # Safely quoted physical StandInit table name for generated SQL.
+    p_tree_tbl_sql <- key_sql_schema$tree_table # Safely quoted physical TreeInit table name for generated SQL.
+    p_stand_id_sql <- key_sql_schema$stand_id # Safely quoted physical StandInit identifier column.
+    p_tree_id_sql <- key_sql_schema$tree_id # Safely quoted physical TreeInit identifier column.
 
     if (isTRUE(identical(p_inv_year_mode, "grow"))) { # Pre-growth requires a valid inventory year for every queued stand.
       if (!("INV_YEAR" %in% names(job_queue))) {
@@ -1384,7 +1421,7 @@
     gen_prog <<- shiny::Progress$new(session, min=0, max=1) # Open modal progress bar for this step.
     gen_prog$set(message = "Executing : Building Stand Keyfiles...", value=0, detail = "Booting up compute cluster (this may take a moment)...") # Initialize user-facing progress text.
     
-    p <- callr::r_bg(function(job_queue, p_cores, p_stand_tbl, p_tree_tbl, p_inv_year, p_inv_year_mode, p_time_int, p_num_cycles, keyfile_db_path, prog_file, unique_scenarios, total_jobs) { # Fork a background R session so Shiny stays responsive.
+    p <- callr::r_bg(function(job_queue, p_cores, p_stand_tbl_sql, p_tree_tbl_sql, p_stand_id_sql, p_tree_id_sql, p_inv_year, p_inv_year_mode, p_time_int, p_num_cycles, keyfile_db_path, prog_file, unique_scenarios, total_jobs) { # Fork a background R session so Shiny stays responsive.
       library(parallel) # Provides PSOCK cluster workers.
       library(doSNOW) # Registers foreach backend with progress callback support.
       library(uuid) # Generates run UUID headers for keyfiles.
@@ -1474,8 +1511,8 @@
                 database_keywords <- c(
                   "Database",
                   "DSNin", keyfile_db_path,
-                  "StandSQL", paste0("SELECT * FROM ", p_stand_tbl, " WHERE STAND_ID = '", stand_id, "'"), "EndSQL",
-                  "TreeSQL",  paste0("SELECT * FROM ", p_tree_tbl, " WHERE STAND_ID = '", stand_id, "'"), "EndSQL",
+                  "StandSQL", paste0("SELECT * FROM ", p_stand_tbl_sql, " WHERE ", p_stand_id_sql, " = '", gsub("'", "''", stand_id, fixed = TRUE), "'"), "EndSQL",
+                  "TreeSQL",  paste0("SELECT * FROM ", p_tree_tbl_sql, " WHERE ", p_tree_id_sql, " = '", gsub("'", "''", stand_id, fixed = TRUE), "'"), "EndSQL",
                   "End"
                 )
                 if (identical(p_inv_year_mode, "reset")) {
@@ -1506,7 +1543,7 @@
                 return(TRUE) # Mark this iteration as successful.
               }
       return(total_jobs) # Return processed count to parent process on successful completion.
-    }, args = list(job_queue, p_cores, p_stand_tbl, p_tree_tbl, p_inv_year, p_inv_year_mode, p_time_int, p_num_cycles, keyfile_db_path, prog_file_gen, unique_scenarios, total_jobs), supervise = TRUE) # Pass immutable args into background scope with supervision enabled.
+    }, args = list(job_queue, p_cores, p_stand_tbl_sql, p_tree_tbl_sql, p_stand_id_sql, p_tree_id_sql, p_inv_year, p_inv_year_mode, p_time_int, p_num_cycles, keyfile_db_path, prog_file_gen, unique_scenarios, total_jobs), supervise = TRUE) # Pass immutable args into background scope with supervision enabled.
     
     bg_gen(p) # Store process handle for progress polling, cancellation, and completion handling.
   })
@@ -1652,7 +1689,7 @@
 
       conns_before <- as.integer(rownames(showConnections(all = FALSE))) # Snapshot open R connections for cleanup bookkeeping.
 
-            foreach(i = seq_len(total_jobs), # Parallel outer loop: one iteration per stand run directory.
+            run_results <- foreach(i = seq_len(total_jobs), # Parallel outer loop: one iteration per stand run directory.
               .packages = c("rFVS"), # Ensure worker has required package namespace.
               .options.snow = if (p_cores > 1L) list(progress = progress_callback_rfvs) else NULL) %dopar% { # Attach progress only when the snow backend is active.
 
@@ -1668,7 +1705,14 @@
                   .GlobalEnv$.fvs_worker_state$active_variant <- NA_character_ # Reset cached active variant.
                 }
                 if (!identical(.GlobalEnv$.fvs_worker_state$active_variant, variant_i)) { # Reload binary only when worker switches variant.
-                  rFVS::fvsLoad(bin = p_bin_loc, fvsProgram = variant_i) # Map target variant binary into worker process.
+                  variant_load_error <- tryCatch({
+                    rFVS::fvsLoad(bin = p_bin_loc, fvsProgram = variant_i) # Map target variant binary into worker process.
+                    NULL
+                  }, error = function(e) e)
+                  if (inherits(variant_load_error, "error")) {
+                    cat(sprintf("[%s] rFVS Variant Load Error (%s): %s\n", Sys.time(), variant_i, variant_load_error$message), file = file.path(stand_dir_path, "fvs_runtime_error.log"), append = TRUE)
+                    return(FALSE) # Isolate a bad variant/load failure to this task instead of terminating the entire queue.
+                  }
                   .GlobalEnv$.fvs_worker_state$active_variant <- variant_i # Cache loaded variant to avoid redundant fvsLoad.
                 }
 
@@ -1714,7 +1758,8 @@
 
       conns_after <- as.integer(rownames(showConnections(all = FALSE))) # Snapshot open connections after parallel work.
       for (cn in setdiff(conns_after, conns_before)) try(close(getConnection(cn)), silent = TRUE) # Close newly opened connections to prevent descriptor leaks.
-      return(total_jobs) # Return processed iteration count to parent process.
+      successful_runs <- sum(vapply(run_results, isTRUE, logical(1))) # Count only tasks that actually completed or validly reused output.
+      return(list(total = total_jobs, successful = successful_runs, failed = total_jobs - successful_runs)) # Return explicit outcome counts to the parent process.
     }, args = list(job_queue, p_cores, p_bin_loc, p_overwrite, prog_file_run, total_jobs), supervise = TRUE) # Launch supervised background process with immutable arguments.
     
     bg_run(p) # Store process handle for progress polling and cancellation observers.
@@ -1749,13 +1794,23 @@
       updateActionButton(session, "kill_run_btn", label = "Cancel", icon = icon("xmark"))
       
       if (p$get_exit_status() == 0) {
+        run_result <- p$get_result()
         completion_title <- if (isTRUE(active_run_is_test())) "Step 2 Test Complete: Sample Simulations Ran" else "Step 2 Complete: Simulations Ran"
-        showModal(modalDialog(
-          title = completion_title,
-          p(sprintf("Successfully processed %s simulation binaries via worker clusters.", p$get_result())),
-          p(sprintf("Elapsed Time: %s", elapsed_run)),
-          easyClose = TRUE, footer = modalButton("Dismiss")
-        ))
+        if (run_result$failed > 0L) {
+          showModal(modalDialog(
+            title = paste0(completion_title, " (With Errors)"),
+            p(sprintf("%d of %d simulations succeeded; %d failed. Review stand-level fvs_runtime_error.log files for details.", run_result$successful, run_result$total, run_result$failed)),
+            p(sprintf("Elapsed Time: %s", elapsed_run)),
+            easyClose = TRUE, footer = modalButton("Dismiss")
+          ))
+        } else {
+          showModal(modalDialog(
+            title = completion_title,
+            p(sprintf("Successfully processed %d simulation binaries.", run_result$successful)),
+            p(sprintf("Elapsed Time: %s", elapsed_run)),
+            easyClose = TRUE, footer = modalButton("Dismiss")
+          ))
+        }
       } else {
         err <- p$read_error_lines()
         showModal(modalDialog(
@@ -1926,7 +1981,11 @@
             s_dir <- combo_jobs$stand_dir[j] # Directory expected to contain stand output DB.
 
             db_files <- list.files(s_dir, pattern = "\\.db$", full.names = FALSE, ignore.case = TRUE) # Discover produced DB files for this stand.
-            if (length(db_files) == 0) next # Skip stands with no DB output.
+            if (length(db_files) == 0) { # Missing output must be reported so an incomplete merge cannot appear successful.
+              local_errors <- local_errors + 1L
+              cat(sprintf("[%s] Stand %s Error: No .db output found in %s.\n", Sys.time(), sid, s_dir), file = log_file, append = TRUE)
+              next
+            }
             if (length(db_files) > 1) { # Multiple DB files are ambiguous; log and skip.
               local_errors <- local_errors + 1L # Increment combo-local error count.
               cat(sprintf("[%s] Stand %s Error: Found multiple .db files in %s: %s.\n", Sys.time(), sid, s_dir, paste(db_files, collapse = ", ")), file = log_file, append = TRUE)
@@ -1938,7 +1997,8 @@
             tryCatch({ # Attach stand DB and stream its tables into combo destination DB.
               safe_stand_db_path <- normalizePath(stand_db, winslash = "/", mustWork = TRUE) # Validate and normalize source DB path.
               try(dbExecute(m_con, "DETACH DATABASE srcdb"), silent = TRUE) # Clean stale attachment from prior iterations.
-              dbExecute(m_con, sprintf("ATTACH DATABASE '%s' AS srcdb", safe_stand_db_path)) # Attach stand DB as `srcdb` alias.
+              safe_stand_db_sql <- gsub("'", "''", safe_stand_db_path, fixed = TRUE) # Escape apostrophes for SQLite string-literal safety.
+              dbExecute(m_con, sprintf("ATTACH DATABASE '%s' AS srcdb", safe_stand_db_sql)) # Attach stand DB as `srcdb` alias.
 
               dbBegin(m_con) # Use transaction for atomic per-stand append.
               tables_in_src <- dbGetQuery(m_con, "SELECT name FROM srcdb.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")$name # Enumerate user tables from stand DB.
@@ -1985,7 +2045,8 @@
           tryCatch({ # Attach scenario DB and stream its tables into project DB.
             safe_path <- normalizePath(scen_db_path, winslash = "/", mustWork = TRUE) # Validate/normalize source DB path.
             try(dbExecute(all_rFVS_sims, "DETACH DATABASE sDB"), silent = TRUE) # Clear stale attachment alias.
-            dbExecute(all_rFVS_sims, sprintf("ATTACH DATABASE '%s' AS sDB", safe_path)) # Attach source scenario DB.
+            safe_path_sql <- gsub("'", "''", safe_path, fixed = TRUE) # Escape apostrophes for SQLite string-literal safety.
+            dbExecute(all_rFVS_sims, sprintf("ATTACH DATABASE '%s' AS sDB", safe_path_sql)) # Attach source scenario DB.
             dbBegin(all_rFVS_sims) # Wrap each scenario append in a transaction.
             tabs <- dbGetQuery(all_rFVS_sims, "SELECT name FROM sDB.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")$name # Enumerate source user tables.
 
