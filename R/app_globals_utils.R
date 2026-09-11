@@ -1,4 +1,4 @@
-﻿
+
 # 1. GLOBAL SETTINGS & UTILITIES
 # ------------------------------------------------------------------------------
 # Robust native OS folder picker wrapper

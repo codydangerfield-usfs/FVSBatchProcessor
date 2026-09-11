@@ -1,4 +1,4 @@
-﻿#' Launch the FVS Batch Processor app
+#' Launch the FVS Batch Processor app
 #'
 #' @param launch.browser Logical; passed to shiny::runApp.
 #' @param ... Additional arguments passed to shiny::runApp.
