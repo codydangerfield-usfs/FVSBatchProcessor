@@ -7,6 +7,7 @@
   step_start_gen <- reactiveVal(NULL) # Stores Step 1 start time for elapsed-time formatting.
   step_start_run <- reactiveVal(NULL) # Stores Step 2 start time.
   step_start_merge <- reactiveVal(NULL) # Stores Step 3 start time.
+  active_gen_total <- reactiveVal(NULL) # Snapshots the Step 1 queue size for stable progress reporting.
   active_run_total <- reactiveVal(NULL) # Snapshots the Step 2 queue size for stable progress reporting.
   active_run_is_test <- reactiveVal(FALSE) # Records whether the active Step 2 process uses the sampled queue.
   
@@ -26,6 +27,23 @@
     mm <- (secs %% 3600) %/% 60 # Extract minute component.
     ss <- secs %% 60 # Extract second component.
     sprintf("%02d:%02d:%02d", hh, mm, ss) # Return zero-padded HH:MM:SS string.
+  }
+
+  resolve_worker_count <- function(total_tasks, requested_cores, workload = c("heavy", "light")) { # Size worker pools from useful work rather than the configured maximum alone.
+    workload <- match.arg(workload)
+    total_tasks <- suppressWarnings(as.integer(total_tasks))
+    requested_cores <- suppressWarnings(as.integer(requested_cores))
+    if (is.na(total_tasks) || total_tasks < 1L) return(1L)
+    if (is.na(requested_cores) || requested_cores < 1L) requested_cores <- 1L
+
+    useful_limit <- min(total_tasks, requested_cores) # Never provision more workers than tasks or the user's selected limit.
+    if (useful_limit <= 1L || identical(workload, "heavy")) return(as.integer(useful_limit)) # Expensive rFVS tasks benefit from every useful worker.
+
+    # Keyfile writes are lightweight and can become slower when PSOCK startup and
+    # network-file contention exceed the work itself. Square-root scaling keeps
+    # small queues small while increasing parallelism steadily for large queues.
+    scaled_limit <- max(2L, as.integer(ceiling(sqrt(total_tasks))))
+    as.integer(min(useful_limit, scaled_limit))
   }
 
   terminate_bg_process <- function(proc) { # Best-effort terminator for callr background process trees.
@@ -1243,10 +1261,11 @@
     if (nrow(jq) == 0) { # Block when queue exists but no jobs matched.
       return("Status: Blocked. Manifest file exists but exact GROUP_CODE cross-join with database targets returned 0 jobs.") # Explain zero-job join condition.
     }
+    planned_workers <- resolve_worker_count(nrow(jq), input$num_cores, workload = "light") # Preview the dynamically scaled key-generation pool.
     
     sprintf( # Return success summary with queue size and run settings.
-      "Pipeline Status: Active Ready Queue\n - Master Database Found: %s\n - Cross-Join Stands Queue: %d active tasks\n - Cores: %d threads requested\n - Project Time Interval: %d cycles (%d total years simulated)\n\n[Ready to generate standalone .key configurations.]", # Template for step-1 readiness diagnostics.
-      basename(full_db_path), nrow(jq), input$num_cores, input$num_cycles, (input$num_cycles * input$time_int) # Populate summary with resolved values.
+      "Pipeline Status: Active Ready Queue\n - Master Database Found: %s\n - Cross-Join Stands Queue: %d active tasks\n - Workers Planned: %d of %d requested\n - Project Time Interval: %d cycles (%d total years simulated)\n\n[Ready to generate standalone .key configurations.]", # Template for step-1 readiness diagnostics.
+      basename(full_db_path), nrow(jq), planned_workers, input$num_cores, input$num_cycles, (input$num_cycles * input$time_int) # Populate summary with resolved values.
     )
   })
   
@@ -1278,9 +1297,10 @@
     }
     
     run_mode <- if (isTRUE(input$test_run_mode)) "TEST — first stand per GROUP_CODE/Scenario" else "FULL"
+    planned_workers <- resolve_worker_count(nrow(jq), input$num_cores_rfvs, workload = "heavy") # Preview all useful workers based on the actual full or sampled execution queue.
     sprintf( # Return success summary with queue size, cores, and variant inventory.
-      "Pipeline Status: Active Ready Queue\n - Master Database Found: %s\n - Execution Mode: %s\n - Full Cross-Join Queue: %d active tasks\n - Current Execution Queue: %d active tasks\n - Cores: %d threads requested\n - Detected FVS Variants: %s (%d total)\n\n[Ready to dispatch parallel rFVS simulations.]", # Template for step-2 readiness diagnostics.
-      basename(full_db_path), run_mode, nrow(full_jq), nrow(jq), input$num_cores_rfvs, detected_variants, if ("VARIANT" %in% names(jq)) length(unique(jq$VARIANT)) else 0 # Populate summary with resolved values.
+      "Pipeline Status: Active Ready Queue\n - Master Database Found: %s\n - Execution Mode: %s\n - Full Cross-Join Queue: %d active tasks\n - Current Execution Queue: %d active tasks\n - Workers Planned: %d of %d requested\n - Detected FVS Variants: %s (%d total)\n\n[Ready to dispatch parallel rFVS simulations.]", # Template for step-2 readiness diagnostics.
+      basename(full_db_path), run_mode, nrow(full_jq), nrow(jq), planned_workers, input$num_cores_rfvs, detected_variants, if ("VARIANT" %in% names(jq)) length(unique(jq$VARIANT)) else 0 # Populate summary with resolved values.
     )
   })
   
@@ -1311,7 +1331,7 @@
     shinyjs::disable("gen_keyfiles") # Prevent duplicate launches while generation is active.
     step_start_gen(Sys.time()) # Record start timestamp for elapsed-time reporting.
     
-    job_queue <- get_job_queue() # Resolve the current stand/scenario task queue from DB + manifest.
+    job_queue <- get_job_queue() # Always generate keyfiles for the complete configured queue.
     if (is.null(job_queue) || nrow(job_queue) == 0) { # Block run when no executable jobs exist.
       shinyjs::enable("gen_keyfiles") # Re-enable launch button because nothing ran.
       shinyjs::hide("kill_gen_btn_wrap") # Keep cancel UI hidden when no background process exists.
@@ -1355,6 +1375,8 @@
     
     unique_scenarios <- unique(job_queue$Scenario) # Build stable scenario index for MgmtId assignment.
     total_jobs <- nrow(job_queue) # Total stands to process in parallel loop.
+    p_cores <- resolve_worker_count(total_jobs, p_cores, workload = "light") # Scale lightweight key generation without paying for an oversized cluster.
+    active_gen_total(total_jobs) # Freeze the progress denominator for this background process.
 
     shinyjs::show("kill_gen_btn_wrap") # Reveal cancel control once work starts.
     
@@ -1367,9 +1389,15 @@
       library(doSNOW) # Registers foreach backend with progress callback support.
       library(uuid) # Generates run UUID headers for keyfiles.
       
-      cl <- makeCluster(p_cores) # Spawn worker cluster with requested core count.
-      registerDoSNOW(cl) # Route `%dopar%` iterations to this cluster.
-      on.exit(stopCluster(cl), add = TRUE) # Guarantee worker shutdown on success/error.
+      cl <- NULL # Hold an optional PSOCK cluster when more than one worker is useful.
+      if (p_cores > 1L) {
+        cl <- makeCluster(p_cores) # Spawn only the capped number of useful workers.
+        registerDoSNOW(cl) # Route `%dopar%` iterations to this cluster.
+        on.exit(stopCluster(cl), add = TRUE) # Guarantee worker shutdown on success/error.
+      } else {
+        foreach::registerDoSEQ() # Avoid PSOCK startup entirely for a single sampled task.
+        writeLines(sprintf("0|Generating %d keyfile without cluster startup...", total_jobs), prog_file)
+      }
       
       last_update <- Sys.time() # Throttle progress-file writes to avoid excessive disk churn.
       progress_callback <- function(n) { # Called by doSNOW after completed loop iterations.
@@ -1381,7 +1409,7 @@
       
             foreach(i = seq_len(total_jobs),  # Parallel outer loop: one iteration per stand/scenario queue record.
               .packages = c("uuid"), # Ensure worker can call UUIDgenerate().
-              .options.snow = list(progress = progress_callback)) %dopar% { # Wire per-iteration progress callback.
+              .options.snow = if (p_cores > 1L) list(progress = progress_callback) else NULL) %dopar% { # Wire progress only when the snow backend is active.
                 
                 stand_id      <- job_queue$STAND_ID[i] # Stand identifier used in SQL and title.
                 stand_cn      <- job_queue$STAND_CN[i] # StandCN block value.
@@ -1495,7 +1523,8 @@
         if (length(l) > 0) { # Proceed only when at least one progress line exists.
           parts <- strsplit(l[length(l)], "\\|")[[1]] # Use most recent `count|detail` payload.
           if (length(parts) >= 2 && !is.null(gen_prog)) { # Update UI only when payload is valid and progress modal exists.
-            val <- as.numeric(parts[1]) / nrow(isolate(get_job_queue())) # Convert processed-count to 0..1 progress fraction.
+            total_jobs <- isolate(active_gen_total()) # Use the queue size captured when this run started.
+            val <- if (!is.null(total_jobs) && total_jobs > 0) as.numeric(parts[1]) / total_jobs else 0 # Convert processed-count to 0..1 progress fraction.
             gen_prog$set(value = val, detail = paste(parts[-1], collapse="|")) # Refresh modal bar value and status text.
           }
         }
@@ -1524,6 +1553,7 @@
           p(paste(err, collapse = "\n")), easyClose = TRUE, footer = modalButton("Dismiss")
         ))
       }
+      active_gen_total(NULL) # Clear the frozen progress denominator.
     }
   })
   
@@ -1535,6 +1565,7 @@
       if (!is.null(gen_prog)) gen_prog$close() # Close visible progress modal.
       gen_prog <<- NULL # Reset progress object.
       step_start_gen(NULL) # Clear elapsed-time start marker.
+      active_gen_total(NULL) # Clear the frozen progress denominator.
       shinyjs::enable("gen_keyfiles") # Re-enable Step 1 launch button.
       shinyjs::hide("kill_gen_btn_wrap") # Hide cancel control since process is no longer running.
       updateActionButton(session, "kill_gen_btn", label = "Cancel", icon = icon("xmark")) # Reset cancel button label/icon to default.
@@ -1560,6 +1591,8 @@
     p_cores      <- input$num_cores_rfvs # Requested parallel worker count for simulations.
     if (is.na(p_cores) || p_cores < 1) p_cores <- 1 # Clamp core count to a valid minimum.
     total_jobs   <- nrow(job_queue) # Total stand runs to dispatch.
+    p_is_test    <- isTRUE(input$test_run_mode) # Snapshot test mode before launching the background process.
+    p_cores      <- resolve_worker_count(total_jobs, p_cores, workload = "heavy") # Use every useful configured worker for expensive full or sampled rFVS tasks.
     
     if (!("VARIANT" %in% names(job_queue))) { # Each run requires variant-specific binary loading.
       shinyjs::enable("run_rfvs") # Restore launch control because run is blocked.
@@ -1572,7 +1605,7 @@
     p_overwrite <- input$overwrite_scens # User-selected scenarios to force rerun/overwrite.
     if (is.null(p_overwrite)) p_overwrite <- character(0) # Normalize NULL input to empty character vector.
     active_run_total(total_jobs) # Freeze the progress denominator for this background process.
-    active_run_is_test(isTRUE(input$test_run_mode)) # Freeze the mode label for completion reporting.
+    active_run_is_test(p_is_test) # Freeze the mode label for completion reporting.
 
     shinyjs::show("kill_run_btn_wrap") # Show cancel button once background process starts.
     
@@ -1589,17 +1622,25 @@
       job_queue <- job_queue[order(job_queue$VARIANT, job_queue$Scenario, job_queue$STAND_ID), , drop = FALSE]
 
       writeLines("0|Initializing FVS binaries mapped to worker RAM...", prog_file) # Emit startup status before dispatch.
-      cl <- makeCluster(p_cores) # Start worker pool for parallel stand runs.
-      on.exit(try(stopCluster(cl), silent = TRUE), add = TRUE) # Always tear down workers on exit.
-      registerDoSNOW(cl) # Route foreach iterations to active cluster.
+      cl <- NULL # Hold an optional PSOCK cluster when the queue contains multiple runs.
+      if (p_cores > 1L) {
+        cl <- makeCluster(p_cores) # Start no more workers than there are executable jobs.
+        on.exit(try(stopCluster(cl), silent = TRUE), add = TRUE) # Always tear down workers on exit.
+        registerDoSNOW(cl) # Route foreach iterations to active cluster.
 
-      clusterExport(cl, c("p_bin_loc", "p_overwrite"), envir = environment()) # Share binary path and overwrite preferences with workers.
-      clusterEvalQ(cl, { # Initialize worker-local state once per worker process.
-        library(rFVS) # Load rFVS inside each worker.
-        .fvs_worker_state <- new.env(parent = emptyenv()) # Create lightweight worker cache.
-        .fvs_worker_state$active_variant <- NA_character_ # Track currently loaded variant per worker.
-        NULL # Return nothing from initialization expression.
-      })
+        clusterExport(cl, c("p_bin_loc", "p_overwrite"), envir = environment()) # Share binary path and overwrite preferences with workers.
+        clusterEvalQ(cl, { # Initialize worker-local state once per worker process.
+          library(rFVS) # Load rFVS inside each worker.
+          .fvs_worker_state <- new.env(parent = emptyenv()) # Create lightweight worker cache.
+          .fvs_worker_state$active_variant <- NA_character_ # Track currently loaded variant per worker.
+          NULL # Return nothing from initialization expression.
+        })
+      } else {
+        foreach::registerDoSEQ() # Run a one-job test directly in the background process without PSOCK startup.
+        .fvs_worker_state <- new.env(parent = emptyenv()) # Initialize the same variant cache used by cluster workers.
+        .fvs_worker_state$active_variant <- NA_character_
+        writeLines("0|Running the single simulation without cluster startup...", prog_file)
+      }
 
       last_update <- Sys.time() # Throttle progress-file writes.
       progress_callback_rfvs <- function(n) { # Called by doSNOW as iterations complete.
@@ -1613,7 +1654,7 @@
 
             foreach(i = seq_len(total_jobs), # Parallel outer loop: one iteration per stand run directory.
               .packages = c("rFVS"), # Ensure worker has required package namespace.
-              .options.snow = list(progress = progress_callback_rfvs)) %dopar% { # Attach progress callback to completion events.
+              .options.snow = if (p_cores > 1L) list(progress = progress_callback_rfvs) else NULL) %dopar% { # Attach progress only when the snow backend is active.
 
                 stand_dir_path <- job_queue$stand_dir[i] # Stand-specific working directory containing `run.key`.
                 variant_i <- job_queue$VARIANT[i] # Variant program token for rFVS::fvsLoad.
@@ -1779,6 +1820,59 @@
       library(RSQLite) # SQLite read/attach/merge operations.
 
       qid <- function(x) paste0('"', gsub('"', '""', x), '"') # Quote SQL identifiers defensively.
+      sqlite_affinity <- function(declared_type) { # Reduce source declarations to safe SQLite affinities for added columns.
+        declared_type <- toupper(ifelse(is.na(declared_type), "", declared_type))
+        if (grepl("INT", declared_type)) return("INTEGER")
+        if (grepl("CHAR|CLOB|TEXT", declared_type)) return("TEXT")
+        if (grepl("REAL|FLOA|DOUB", declared_type)) return("REAL")
+        if (!nzchar(declared_type) || grepl("BLOB", declared_type)) return("BLOB")
+        "NUMERIC"
+      }
+      append_attached_table <- function(con, source_schema, table_name) { # Union schemas and append source rows by column name in either merge phase.
+        table_q <- qid(table_name)
+        source_info <- dbGetQuery(con, sprintf("PRAGMA %s.table_info(%s)", source_schema, table_q))
+        if (nrow(source_info) == 0) return(invisible(NULL))
+
+        destination_exists <- toupper(table_name) %in% toupper(dbListTables(con))
+        if (!destination_exists) {
+          dbExecute(con, sprintf("CREATE TABLE %s AS SELECT * FROM %s.%s", table_q, source_schema, table_q))
+          return(invisible(NULL))
+        }
+
+        destination_info <- dbGetQuery(con, sprintf("PRAGMA main.table_info(%s)", table_q))
+        destination_keys <- toupper(destination_info$name)
+        new_source_rows <- source_info[!(toupper(source_info$name) %in% destination_keys), , drop = FALSE]
+        if (nrow(new_source_rows) > 0) {
+          for (column_idx in seq_len(nrow(new_source_rows))) {
+            column_name <- new_source_rows$name[column_idx]
+            column_type <- sqlite_affinity(new_source_rows$type[column_idx])
+            dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN %s %s", table_q, qid(column_name), column_type))
+          }
+          destination_info <- dbGetQuery(con, sprintf("PRAGMA main.table_info(%s)", table_q))
+        }
+
+        source_match <- match(toupper(destination_info$name), toupper(source_info$name))
+        select_expressions <- vapply(seq_len(nrow(destination_info)), function(column_idx) {
+          if (is.na(source_match[column_idx])) {
+            sprintf("NULL AS %s", qid(destination_info$name[column_idx]))
+          } else {
+            qid(source_info$name[source_match[column_idx]])
+          }
+        }, character(1))
+        destination_columns <- paste(vapply(destination_info$name, qid, character(1)), collapse = ", ")
+        dbExecute(
+          con,
+          sprintf(
+            "INSERT INTO %s (%s) SELECT %s FROM %s.%s",
+            table_q,
+            destination_columns,
+            paste(select_expressions, collapse = ", "),
+            source_schema,
+            table_q
+          )
+        )
+        invisible(NULL)
+      }
       total_errors <- 0 # Aggregate failures across both merge phases.
 
       # Phase 1: merge each Group/Scenario independently in parallel.
@@ -1799,62 +1893,9 @@
       phase1_results <- foreach( # Parallel outer loop: each iteration merges one Group/Scenario stack.
         combo_idx = seq_len(total_combos), # Iterate all unique Group/Scenario combinations.
         .packages = c("RSQLite"), # Ensure SQLite APIs are available in workers.
+        .export = c("qid", "sqlite_affinity", "append_attached_table"), # Share the same schema-union implementation used later by phase 2.
         .options.snow = list(progress = progress_callback) # Wire completion callback for UI progress.
       ) %dopar% {
-        qid_local <- function(x) paste0('"', gsub('"', '""', x), '"') # Worker-local identifier quoting helper.
-        sqlite_affinity_local <- function(declared_type) { # Reduce source declarations to safe SQLite affinities for added columns.
-          declared_type <- toupper(ifelse(is.na(declared_type), "", declared_type))
-          if (grepl("INT", declared_type)) return("INTEGER")
-          if (grepl("CHAR|CLOB|TEXT", declared_type)) return("TEXT")
-          if (grepl("REAL|FLOA|DOUB", declared_type)) return("REAL")
-          if (!nzchar(declared_type) || grepl("BLOB", declared_type)) return("BLOB")
-          "NUMERIC"
-        }
-        append_attached_table_local <- function(con, source_schema, table_name) { # Union schemas and append source rows by column name.
-          table_q <- qid_local(table_name)
-          source_info <- dbGetQuery(con, sprintf("PRAGMA %s.table_info(%s)", source_schema, table_q))
-          if (nrow(source_info) == 0) return(invisible(NULL))
-
-          destination_exists <- toupper(table_name) %in% toupper(dbListTables(con))
-          if (!destination_exists) {
-            dbExecute(con, sprintf("CREATE TABLE %s AS SELECT * FROM %s.%s", table_q, source_schema, table_q))
-            return(invisible(NULL))
-          }
-
-          destination_info <- dbGetQuery(con, sprintf("PRAGMA main.table_info(%s)", table_q))
-          destination_keys <- toupper(destination_info$name)
-          new_source_rows <- source_info[!(toupper(source_info$name) %in% destination_keys), , drop = FALSE]
-          if (nrow(new_source_rows) > 0) {
-            for (column_idx in seq_len(nrow(new_source_rows))) {
-              column_name <- new_source_rows$name[column_idx]
-              column_type <- sqlite_affinity_local(new_source_rows$type[column_idx])
-              dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN %s %s", table_q, qid_local(column_name), column_type))
-            }
-            destination_info <- dbGetQuery(con, sprintf("PRAGMA main.table_info(%s)", table_q))
-          }
-
-          source_match <- match(toupper(destination_info$name), toupper(source_info$name))
-          select_expressions <- vapply(seq_len(nrow(destination_info)), function(column_idx) {
-            if (is.na(source_match[column_idx])) {
-              sprintf("NULL AS %s", qid_local(destination_info$name[column_idx]))
-            } else {
-              qid_local(source_info$name[source_match[column_idx]])
-            }
-          }, character(1))
-          destination_columns <- paste(vapply(destination_info$name, qid_local, character(1)), collapse = ", ")
-          dbExecute(
-            con,
-            sprintf(
-              "INSERT INTO %s (%s) SELECT %s FROM %s.%s",
-              table_q,
-              destination_columns,
-              paste(select_expressions, collapse = ", "),
-              source_schema,
-              table_q
-            )
-          )
-          invisible(NULL)
-        }
         grp  <- unique_combos$GROUP_CODE[combo_idx] # Current group code for this combo task.
         scen <- unique_combos$Scenario[combo_idx] # Current scenario label for this combo task.
 
@@ -1902,7 +1943,7 @@
               dbBegin(m_con) # Use transaction for atomic per-stand append.
               tables_in_src <- dbGetQuery(m_con, "SELECT name FROM srcdb.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")$name # Enumerate user tables from stand DB.
               for (tbl_name in tables_in_src) { # Serial table loop: union schemas and append rows by matching column names.
-                append_attached_table_local(m_con, "srcdb", tbl_name)
+                append_attached_table(m_con, "srcdb", tbl_name)
                 if (!(tbl_name %in% created_tables)) created_tables <- c(created_tables, tbl_name)
               }
               dbCommit(m_con) # Commit successful per-stand append.
@@ -1938,59 +1979,6 @@
         dbExecute(all_rFVS_sims, "PRAGMA temp_store = MEMORY") # Keep temp data in memory.
         dbExecute(all_rFVS_sims, "PRAGMA cache_size = -200000") # Increase cache for streaming inserts.
         mega_created_tables <- character(0) # Track tables created in project-level destination DB.
-        sqlite_affinity <- function(declared_type) { # Reduce source declarations to safe SQLite affinities for added columns.
-          declared_type <- toupper(ifelse(is.na(declared_type), "", declared_type))
-          if (grepl("INT", declared_type)) return("INTEGER")
-          if (grepl("CHAR|CLOB|TEXT", declared_type)) return("TEXT")
-          if (grepl("REAL|FLOA|DOUB", declared_type)) return("REAL")
-          if (!nzchar(declared_type) || grepl("BLOB", declared_type)) return("BLOB")
-          "NUMERIC"
-        }
-        append_attached_table <- function(con, source_schema, table_name) { # Union schemas and append source rows by column name.
-          table_q <- qid(table_name)
-          source_info <- dbGetQuery(con, sprintf("PRAGMA %s.table_info(%s)", source_schema, table_q))
-          if (nrow(source_info) == 0) return(invisible(NULL))
-
-          destination_exists <- toupper(table_name) %in% toupper(dbListTables(con))
-          if (!destination_exists) {
-            dbExecute(con, sprintf("CREATE TABLE %s AS SELECT * FROM %s.%s", table_q, source_schema, table_q))
-            return(invisible(NULL))
-          }
-
-          destination_info <- dbGetQuery(con, sprintf("PRAGMA main.table_info(%s)", table_q))
-          destination_keys <- toupper(destination_info$name)
-          new_source_rows <- source_info[!(toupper(source_info$name) %in% destination_keys), , drop = FALSE]
-          if (nrow(new_source_rows) > 0) {
-            for (column_idx in seq_len(nrow(new_source_rows))) {
-              column_name <- new_source_rows$name[column_idx]
-              column_type <- sqlite_affinity(new_source_rows$type[column_idx])
-              dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN %s %s", table_q, qid(column_name), column_type))
-            }
-            destination_info <- dbGetQuery(con, sprintf("PRAGMA main.table_info(%s)", table_q))
-          }
-
-          source_match <- match(toupper(destination_info$name), toupper(source_info$name))
-          select_expressions <- vapply(seq_len(nrow(destination_info)), function(column_idx) {
-            if (is.na(source_match[column_idx])) {
-              sprintf("NULL AS %s", qid(destination_info$name[column_idx]))
-            } else {
-              qid(source_info$name[source_match[column_idx]])
-            }
-          }, character(1))
-          destination_columns <- paste(vapply(destination_info$name, qid, character(1)), collapse = ", ")
-          dbExecute(
-            con,
-            sprintf(
-              "INSERT INTO %s (%s) SELECT %s FROM %s.%s",
-              table_q,
-              destination_columns,
-              paste(select_expressions, collapse = ", "),
-              source_schema,
-              table_q
-            )
-          )
-          invisible(NULL)
-        }
 
         for (k in seq_along(scen_db_paths)) { # Serial loop: append each scenario DB into one project master DB.
           scen_db_path <- scen_db_paths[k] # Current scenario DB path to attach.
