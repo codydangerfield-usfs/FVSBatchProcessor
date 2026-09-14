@@ -1,5 +1,4 @@
-
-# 1. GLOBAL SETTINGS & UTILITIES
+﻿# 1. GLOBAL SETTINGS & UTILITIES
 # ------------------------------------------------------------------------------
 # Robust native OS folder picker wrapper
 #
@@ -546,7 +545,7 @@ recalculate_scenarios <- function(df, old_df = NULL, scenario_cols = NULL, force
 #   Unzips, mutates XML, and re-zips to the original file path.
 strip_missing_drawing_relationships <- function(xlsx_path) {
   tmp_dir <- tempfile("xlsx_clean_"); dir.create(tmp_dir); on.exit(unlink(tmp_dir, recursive = TRUE, force = TRUE), add = TRUE)
-  unzip(xlsx_path, exdir = tmp_dir)
+  zip::unzip(xlsx_path, exdir = tmp_dir)
   rel_dir <- file.path(tmp_dir, "xl", "worksheets", "_rels")
   if (dir.exists(rel_dir)) {
     rel_files <- list.files(rel_dir, pattern = "\\.rels$", full.names = TRUE)
@@ -618,7 +617,7 @@ read_xlsx_constant_text_formulas <- function(xlsx_path, column_index, sheet_inde
   }
 
   sheet_path <- sprintf("xl/worksheets/sheet%d.xml", as.integer(sheet_index))
-  archive_files <- tryCatch(unzip(xlsx_path, list = TRUE)$Name, error = function(e) character(0))
+  archive_files <- tryCatch(zip::zip_list(xlsx_path)$filename, error = function(e) character(0))
   if (!(sheet_path %in% archive_files)) {
     return(data.frame(excel_row = integer(0), value = character(0)))
   }
