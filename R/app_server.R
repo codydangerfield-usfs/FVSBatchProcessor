@@ -46,6 +46,11 @@ server <- function(input, output, session) {
     as.integer(min(useful_limit, scaled_limit))
   }
 
+  variant_default_cycle_length <- function(variants) { # Return USDA fvsOL default cycle lengths from raw or FVS-prefixed variant codes.
+    variant_codes <- toupper(sub("^FVS", "", trimws(as.character(variants)), ignore.case = TRUE))
+    ifelse(variant_codes %in% c("SN", "NC", "OC", "OP"), 5L, 10L)
+  }
+
   terminate_bg_process <- function(proc) { # Best-effort terminator for callr background process trees.
     if (is.null(proc)) return(FALSE) # No process object means nothing to terminate.
 
@@ -385,6 +390,9 @@ server <- function(input, output, session) {
               var_df <- dbGetQuery(con, var_query) # Execute variant inventory query.
               if (nrow(var_df) > 0) {
                 unique_vars <- unique(tolower(trimws(var_df$VARIANT))) # Normalize variant labels for consistent counting.
+                variant_cycle_lengths <- unique(variant_default_cycle_length(unique_vars)) # Resolve the default interval represented by the selected table.
+                default_time_int <- if (length(variant_cycle_lengths) == 1L) variant_cycle_lengths[1] else 10L # Use 10 years when mixed variants have different defaults.
+                updateNumericInput(session, "time_int", value = default_time_int) # Initialize regular simulation timing from the detected variant default; users may override it afterward.
                 if (length(unique_vars) > 1) {
                   showNotification(sprintf("Multiple FVS Variants detected (%s).", paste(toupper(unique_vars), collapse = ", ")), type = "message") # Inform user of mixed-variant dataset.
                 }
@@ -1437,6 +1445,12 @@ server <- function(input, output, session) {
         showNotification("Cannot preserve and grow inventory years: the selected stand table has no INV_YEAR column.", type = "error", duration = 8)
         return()
       }
+      if (!("VARIANT" %in% names(job_queue)) || any(is.na(job_queue$VARIANT) | !nzchar(trimws(as.character(job_queue$VARIANT))))) {
+        shinyjs::enable("gen_keyfiles")
+        step_start_gen(NULL)
+        showNotification("Cannot preserve and grow inventory years: every queued stand must have a valid VARIANT.", type = "error", duration = 8)
+        return()
+      }
       stand_inv_years <- suppressWarnings(as.integer(job_queue$INV_YEAR))
       if (any(is.na(stand_inv_years))) {
         shinyjs::enable("gen_keyfiles")
@@ -1450,6 +1464,28 @@ server <- function(input, output, session) {
         showNotification(sprintf("Common start year must be at least %d, the latest INV_YEAR in the active queue.", max(stand_inv_years)), type = "error", duration = 8)
         return()
       }
+
+      job_queue$bridge_time_int <- variant_default_cycle_length(job_queue$VARIANT) # Match the variant defaults used by USDA fvsOL.
+      bridge_cycle_counts <- ceiling((p_inv_year - stand_inv_years) / job_queue$bridge_time_int)
+      total_cycle_counts <- bridge_cycle_counts + p_num_cycles
+      if (any(total_cycle_counts > 40L)) {
+        shinyjs::enable("gen_keyfiles")
+        step_start_gen(NULL)
+        showNotification(
+          sprintf(
+            "Cannot generate keyfiles: FVS supports at most 40 cycles, but one or more stands require up to %d after variant-based pre-growth. Reduce Simulation Cycles Count or choose an earlier common start year.",
+            max(total_cycle_counts)
+          ),
+          type = "error",
+          duration = 12
+        )
+        return()
+      }
+    } else if (p_num_cycles > 40L) {
+      shinyjs::enable("gen_keyfiles")
+      step_start_gen(NULL)
+      showNotification("Cannot generate keyfiles: FVS supports at most 40 simulation cycles.", type = "error", duration = 8)
+      return()
     }
     
     unique_scenarios <- unique(job_queue$Scenario) # Build stable scenario index for MgmtId assignment.
@@ -1525,11 +1561,13 @@ server <- function(input, output, session) {
                 stack_block <- c(stack_block, "*-----------------------------------------------*") # Close stack comment block.
 
                 # In preserve/grow mode, retain the stand's database InvYear and
-                # insert any bridge cycles needed to reach the common start year.
-                # The requested number of regular cycles begins only after that year.
+                # grow forward with the variant default (5 years for SN/NC/OC/OP,
+                # otherwise 10 years) until the common start year. User-selected
+                # regular cycles begin only after that year.
                 timing_keywords <- if (identical(p_inv_year_mode, "grow")) {
                   stand_inv_year <- as.integer(job_queue$INV_YEAR[i])
-                  bridge_years <- seq(stand_inv_year, p_inv_year, by = p_time_int)
+                  bridge_time_int <- as.integer(job_queue$bridge_time_int[i])
+                  bridge_years <- seq(stand_inv_year, p_inv_year, by = bridge_time_int)
                   regular_years <- seq(p_inv_year, p_inv_year + p_num_cycles * p_time_int, by = p_time_int)
                   cycle_years <- sort(unique(c(bridge_years, p_inv_year, regular_years)))
                   cycle_intervals <- diff(cycle_years)

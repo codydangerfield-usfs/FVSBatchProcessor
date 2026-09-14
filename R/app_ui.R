@@ -203,7 +203,7 @@ ui <- function(request) {
         h5("Keyfile Parameters"),
         numericInput("num_cores", paste0("Compute Cores (Parallel Generation - ", sys_cores, " Available)"), value = def_cores, min = 1, step = 1),
         numericInput("num_cycles", "Simulation Cycles Count", value = 10, min = 1, step = 1),
-        numericInput("time_int", "Cycle Time Interval (Years)", value = 10, min = 1, step = 1),
+        numericInput("time_int", "Cycle Time Interval (Years)", value = 10, min = 1, step = 1), # Updated to the detected variant default after the stand table loads.
         numericInput("inv_year", "Common Simulation Start Year", value = 2024, min = 1900, step = 1),
         radioButtons(
           "inv_year_mode",
@@ -214,7 +214,7 @@ ui <- function(request) {
           ),
           selected = "reset"
         ),
-        helpText("The common start year defaults to the latest InvYear in the selected stand table."),
+        helpText("The common start year defaults to the latest InvYear in the selected stand table. Cycle interval defaults to 5 years for SN, NC, OC, and OP variants and 10 years for all other variants; mixed defaults use 10 years. Preserve/grow uses each stand's variant default for bridge cycles, while the selected interval applies after the common start year."),
         hr(),
         actionButton("gen_keyfiles", "Generate Stand Keyfiles", icon = icon("cogs"), class = "btn-primary w-100 mb-2"),
         div(
