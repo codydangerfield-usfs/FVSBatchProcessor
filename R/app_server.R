@@ -461,6 +461,13 @@ server <- function(input, output, session) {
   
   # Reactive value to explicitly trigger job queue recalculation when the manifest is successfully written to disk
   manifest_trigger <- reactiveVal(0) # Post-write increment used to force safe queue recomputation.
+  manifest_ready <- reactiveVal(FALSE) # Require an explicit successful manifest save for the current configuration and session.
+
+  observeEvent(
+    list(grid_data(), input$root_dir, input$master_db, input$stand_tbl, input$group_col, input$use_groups_col),
+    manifest_ready(FALSE), # Any lookup or database-context change makes the previously saved manifest stale.
+    ignoreInit = TRUE
+  )
   
   observe({ # Keep overwrite-scenarios selector synchronized with currently available queue scenarios.
     jq <- get_job_queue() # Resolve active job queue snapshot.
@@ -477,6 +484,7 @@ server <- function(input, output, session) {
     # To prevent reactive race conditions between file writing and UI updates
     # we explicitly wait for this trigger (fired only AFTER the file finishes saving)
     manifest_trigger() # Depend on explicit post-write trigger to avoid reading partial files.
+    if (!isTRUE(manifest_ready())) return(NULL) # Never run from a pre-existing or stale manifest that was not saved for the current UI state.
     
     req(input$root_dir, input$master_db, input$group_col, input$stand_tbl) # Require key UI inputs before proceeding.
     
@@ -1147,6 +1155,7 @@ server <- function(input, output, session) {
   })
   
   observeEvent(input$save_matrix, { # Compile current matrix into GROUP_CODE/Scenario manifest records.
+    manifest_ready(FALSE) # Keep the pipeline blocked unless this save completes successfully.
     df <- grid_data() # Read current matrix state.
     if (nrow(df) == 0) { # Guard against empty table saves.
       showNotification("No data array available to build scenarios.", type = "error") # Notify user matrix has no rows.
@@ -1223,7 +1232,21 @@ server <- function(input, output, session) {
       run_base_dir <- dirname(m_file) # Resolve containing output folder.
       if (!dir.exists(run_base_dir)) dir.create(run_base_dir, recursive = TRUE, showWarnings = FALSE) # Ensure output directory exists.
       
-      write.csv(final_manifest_df, m_file, row.names = FALSE, na = "") # Write compiled manifest to disk.
+      tryCatch(
+        write.csv(final_manifest_df, m_file, row.names = FALSE, na = ""), # Write compiled manifest to disk.
+        error = function(e) {
+          stop(
+            paste(
+              "The manifest CSV could not be saved. It is likely open or locked by Excel or another application.",
+              "Close KCP_AddFile_Manifest.csv and try Save Matrix Settings again.",
+              paste0("System message: ", e$message)
+            ),
+            call. = FALSE
+          )
+        }
+      )
+
+      manifest_ready(TRUE) # Unlock Steps 1–3 only after the current matrix is successfully written.
       
       # Explicitly signal to the reactive queue that a new manifest is on disk
       manifest_trigger(manifest_trigger() + 1) # Trigger queue recalculation after successful write.
@@ -1256,6 +1279,9 @@ server <- function(input, output, session) {
     if (!file.exists(m_file)) { # Block when manifest has not yet been saved.
       return("Status: Blocked. Active 'KCP_AddFile_Manifest.csv' not found in the rFVS_Runs directory. Save matrix settings on Panel 2 first.") # Explain missing manifest prerequisite.
     }
+    if (!isTRUE(manifest_ready())) {
+      return("Status: Blocked. Run 'Save KCP Scenarios & Build Manifest' for the current KCP lookup table before generating keyfiles.")
+    }
     
     jq <- get_job_queue() # Build joined stand/scenario queue for readiness checks.
     if (is.null(jq)) { # Block when queue construction failed.
@@ -1282,6 +1308,9 @@ server <- function(input, output, session) {
     }
     if (!file.exists(m_file)) { # Block when manifest has not yet been saved.
       return("Status: Blocked. Active 'KCP_AddFile_Manifest.csv' not found. Save matrix settings on Panel 2 first.") # Explain missing manifest prerequisite.
+    }
+    if (!isTRUE(manifest_ready())) {
+      return("Status: Blocked. Run 'Save KCP Scenarios & Build Manifest' for the current KCP lookup table before running rFVS.")
     }
     
     full_jq <- get_job_queue() # Build the complete joined stand/scenario queue for readiness checks.
@@ -1316,6 +1345,9 @@ server <- function(input, output, session) {
     if (!file.exists(full_db_path) || !file.exists(m_file)) { # Block when DB or manifest prerequisite is missing.
       return("Status: Blocked. Setup incomplete.") # Explain missing prerequisites for merge stage.
     }
+    if (!isTRUE(manifest_ready())) {
+      return("Status: Blocked. Run 'Save KCP Scenarios & Build Manifest' for the current KCP lookup table before merging outputs.")
+    }
     
     jq <- get_job_queue() # Build joined stand/scenario queue used to derive merge targets.
     if (is.null(jq) || nrow(jq) == 0) { # Block when there are no jobs available to merge.
@@ -1335,6 +1367,13 @@ server <- function(input, output, session) {
   observeEvent(input$gen_keyfiles, { # Start Step 1: build per-stand `run.key` files in parallel.
     shinyjs::disable("gen_keyfiles") # Prevent duplicate launches while generation is active.
     step_start_gen(Sys.time()) # Record start timestamp for elapsed-time reporting.
+
+    if (!isTRUE(manifest_ready())) {
+      shinyjs::enable("gen_keyfiles")
+      step_start_gen(NULL)
+      showNotification("Run 'Save KCP Scenarios & Build Manifest' for the current KCP lookup table before generating keyfiles.", type = "warning", duration = 8)
+      return()
+    }
     
     job_queue <- get_job_queue() # Always generate keyfiles for the complete configured queue.
     if (is.null(job_queue) || nrow(job_queue) == 0) { # Block run when no executable jobs exist.
@@ -1617,6 +1656,13 @@ server <- function(input, output, session) {
   observeEvent(input$run_rfvs, { # Start Step 2: execute generated keyfiles through rFVS in parallel.
     shinyjs::disable("run_rfvs") # Prevent duplicate launches while workers are active.
     step_start_run(Sys.time()) # Record start timestamp for elapsed-time reporting.
+
+    if (!isTRUE(manifest_ready())) {
+      shinyjs::enable("run_rfvs")
+      step_start_run(NULL)
+      showNotification("Run 'Save KCP Scenarios & Build Manifest' for the current KCP lookup table before running rFVS.", type = "warning", duration = 8)
+      return()
+    }
     
     job_queue <- get_execution_queue() # Resolve the full or sampled execution queue according to Step 2 test mode.
     if (is.null(job_queue) || nrow(job_queue) == 0) { # Block run when no executable stand records exist.
@@ -1868,6 +1914,13 @@ server <- function(input, output, session) {
   observeEvent(input$merge_outputs, { # Start Step 3: merge stand/scenario DB outputs into consolidated project DBs.
     shinyjs::disable("merge_outputs") # Prevent duplicate merge launches while process is active.
     step_start_merge(Sys.time()) # Record merge start time for elapsed reporting.
+
+    if (!isTRUE(manifest_ready())) {
+      shinyjs::enable("merge_outputs")
+      step_start_merge(NULL)
+      showNotification("Run 'Save KCP Scenarios & Build Manifest' for the current KCP lookup table before merging outputs.", type = "warning", duration = 8)
+      return()
+    }
     
     job_queue <- get_job_queue() # Resolve stand/scenario outputs expected for merge.
     if (is.null(job_queue) || nrow(job_queue) == 0) { # Block merge when queue is empty.
