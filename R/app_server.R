@@ -1535,18 +1535,18 @@ server <- function(input, output, session) {
                   cycle_intervals <- diff(cycle_years)
                   interval_overrides <- vapply(
                     which(cycle_intervals != p_time_int),
-                    function(cycle_index) sprintf("TimeInt  %10d%10d", cycle_index, cycle_intervals[cycle_index]),
+                    function(cycle_index) sprintf("%-10s%10d%10d", "TimeInt", cycle_index, cycle_intervals[cycle_index]),
                     character(1)
                   )
                   c(
-                    paste0("TimeInt                   ", p_time_int),
+                    sprintf("%-10s%10d", "TimeInt", p_time_int),
                     interval_overrides,
-                    paste0("NumCycle     ", length(cycle_intervals))
+                    sprintf("%-10s%10d", "NumCycle", length(cycle_intervals))
                   )
                 } else {
                   c(
-                    paste0("TimeInt                   ", p_time_int),
-                    paste0("NumCycle     ", p_num_cycles)
+                    sprintf("%-10s%10d", "TimeInt", p_time_int),
+                    sprintf("%-10s%10d", "NumCycle", p_num_cycles)
                   )
                 }
 
