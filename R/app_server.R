@@ -594,7 +594,7 @@ server <- function(input, output, session) {
     sample_columns <- ordered_queue[, c("GROUP_CODE", "Scenario"), drop = FALSE]
     ordered_queue[!duplicated(sample_columns), , drop = FALSE]
   })
-  
+
   # --- SYSTEM SCANNING OBSERVER ---
   # Loads the available database context and dynamic KCP lookup combinations into a central reactive UI table
   observeEvent(input$load_metadata, { # Re-scan DB and KCP sources to rebuild UI metadata and defaults.
@@ -1246,6 +1246,7 @@ server <- function(input, output, session) {
   })
   
   output$pipeline_diagnostics <- renderText({ # Render readiness summary for Step 1 keyfile generation.
+    manifest_trigger() # Re-render when Save Matrix creates or replaces the manifest, even if it was missing during the prior render.
     full_db_path <- resolve_db_path(input$root_dir, input$master_db) # Resolve effective master DB path from current UI inputs.
     m_file <- manifest_path() # Resolve expected manifest CSV path.
     
@@ -1272,6 +1273,7 @@ server <- function(input, output, session) {
   })
   
   output$pipeline_diagnostics_rfvs <- renderText({ # Render readiness summary for Step 2 rFVS execution.
+    manifest_trigger() # Re-render when Save Matrix creates or replaces the manifest, even if it was missing during the prior render.
     full_db_path <- resolve_db_path(input$root_dir, input$master_db) # Resolve effective master DB path from current UI inputs.
     m_file <- manifest_path() # Resolve expected manifest CSV path.
     
@@ -1301,12 +1303,13 @@ server <- function(input, output, session) {
     run_mode <- if (isTRUE(input$test_run_mode)) "TEST — first stand per GROUP_CODE/Scenario" else "FULL"
     planned_workers <- resolve_worker_count(nrow(jq), input$num_cores_rfvs, workload = "heavy") # Preview all useful workers based on the actual full or sampled execution queue.
     sprintf( # Return success summary with queue size, cores, and variant inventory.
-      "Pipeline Status: Active Ready Queue\n - Master Database Found: %s\n - Execution Mode: %s\n - Full Cross-Join Queue: %d active tasks\n - Current Execution Queue: %d active tasks\n - Workers Planned: %d of %d requested\n - Detected FVS Variants: %s (%d total)\n\n[Ready to dispatch parallel rFVS simulations.]", # Template for step-2 readiness diagnostics.
-      basename(full_db_path), run_mode, nrow(full_jq), nrow(jq), planned_workers, input$num_cores_rfvs, detected_variants, if ("VARIANT" %in% names(jq)) length(unique(jq$VARIANT)) else 0 # Populate summary with resolved values.
+      "Pipeline Status: Active Ready Queue\n - Master Database Found: %s\n - Execution Mode: %s\n - Full Cross-Join Queue: %d active tasks\n - Current Execution Queue: %d active tasks\n - Workers Planned: %d of %d requested\n - Detected FVS Variants: %s (%d total)\n\n[Ready to dispatch parallel rFVS simulations.]", # Template for lightweight step-2 readiness diagnostics.
+      basename(full_db_path), run_mode, nrow(full_jq), nrow(jq), planned_workers, input$num_cores_rfvs, detected_variants, if ("VARIANT" %in% names(jq)) length(unique(jq$VARIANT)) else 0 # Populate summary with queue and worker details.
     )
   })
   
   output$pipeline_diagnostics_merge <- renderText({ # Render readiness summary for Step 3 output merge.
+    manifest_trigger() # Re-render when Save Matrix creates or replaces the manifest, even if it was missing during the prior render.
     full_db_path <- resolve_db_path(input$root_dir, input$master_db) # Resolve effective master DB path from current UI inputs.
     m_file <- manifest_path() # Resolve expected manifest CSV path.
     
@@ -1321,7 +1324,7 @@ server <- function(input, output, session) {
     
     unique_combos <- unique(jq[, c("GROUP_CODE", "Scenario")]) # Count unique Group/Scenario output databases to merge.
     sprintf( # Return success summary with merge workload and destination.
-      "Pipeline Status: Ready to Consolidate\n - Scenarios to Merge: %d\n - Cores: %d threads requested\n - Target Outputs directory: %s\n\n[All scenario DBs will be compiled and then merged into a single master DB.]", # Template for step-3 readiness diagnostics.
+      "Pipeline Status: Ready to Consolidate\n - Scenarios to Merge: %d\n - Cores: %d threads requested\n - Target Outputs directory: %s\n\n[All scenario DBs will be compiled and then merged into a single master DB.]", # Template for lightweight step-3 readiness diagnostics.
       nrow(unique_combos), # Number of unique scenario databases expected in merge.
       input$num_cores_merge, # User-requested core count for merge workers.
       file.path(input$root_dir, "Outputs") # Final output directory path.
@@ -1697,7 +1700,22 @@ server <- function(input, output, session) {
                 variant_i <- job_queue$VARIANT[i] # Variant program token for rFVS::fvsLoad.
                 scenario_i <- job_queue$Scenario[i] # Scenario label used for overwrite filtering.
 
-                if (!dir.exists(stand_dir_path)) return(FALSE) # Skip missing stand directories as failed iteration.
+                if (!dir.exists(stand_dir_path)) { # Preserve a visible error record even when Step 1 never created this stand directory.
+                  dir.create(stand_dir_path, recursive = TRUE, showWarnings = FALSE)
+                  cat(sprintf("[%s] rFVS Runtime Error: Expected stand run directory and run.key were not created before Step 2.\n", Sys.time()), file = file.path(stand_dir_path, "fvs_runtime_error.log"), append = TRUE)
+                  return(FALSE)
+                }
+                runtime_error_log <- file.path(stand_dir_path, "fvs_runtime_error.log") # Use one current-attempt error log per stand run.
+                clear_runtime_error_log <- function() { # Remove stale/current error state whenever this stand begins or finishes successfully.
+                  if (file.exists(runtime_error_log)) unlink(runtime_error_log, force = TRUE)
+                  if (file.exists(runtime_error_log)) try(file.remove(runtime_error_log), silent = TRUE) # Retry through the alternate file-removal API on Windows.
+                  !file.exists(runtime_error_log)
+                }
+                clear_runtime_error_log() # Clear errors from a prior attempt before validating or retrying this queued run.
+                if (!file.exists(file.path(stand_dir_path, "run.key"))) { # Fail clearly before invoking rFVS when the expected keyfile is absent.
+                  cat(sprintf("[%s] rFVS Runtime Error: Expected run.key was not found in %s.\n", Sys.time(), stand_dir_path), file = runtime_error_log, append = TRUE)
+                  return(FALSE)
+                }
 
                 # Each worker reloads rFVS only when variant changes on that worker.
                 if (!exists(".fvs_worker_state", envir = .GlobalEnv, inherits = FALSE)) { # Defensive fallback if worker state was not initialized.
@@ -1710,7 +1728,7 @@ server <- function(input, output, session) {
                     NULL
                   }, error = function(e) e)
                   if (inherits(variant_load_error, "error")) {
-                    cat(sprintf("[%s] rFVS Variant Load Error (%s): %s\n", Sys.time(), variant_i, variant_load_error$message), file = file.path(stand_dir_path, "fvs_runtime_error.log"), append = TRUE)
+                    cat(sprintf("[%s] rFVS Variant Load Error (%s): %s\n", Sys.time(), variant_i, variant_load_error$message), file = runtime_error_log, append = TRUE)
                     return(FALSE) # Isolate a bad variant/load failure to this task instead of terminating the entire queue.
                   }
                   .GlobalEnv$.fvs_worker_state$active_variant <- variant_i # Cache loaded variant to avoid redundant fvsLoad.
@@ -1722,10 +1740,11 @@ server <- function(input, output, session) {
 
                 if (!is_overwrite) { # Reuse mode: do not rerun when a valid single DB already exists.
                   if (length(db_files) > 1) { # Multiple DBs indicate ambiguous prior output state.
-                    cat(sprintf("[%s] rFVS Runtime Error: Found multiple .db files in %s: %s\n", Sys.time(), stand_dir_path, paste(db_files, collapse = ", ")), file = file.path(stand_dir_path, "fvs_runtime_error.log"), append = TRUE)
+                    cat(sprintf("[%s] rFVS Runtime Error: Found multiple .db files in %s: %s\n", Sys.time(), stand_dir_path, paste(db_files, collapse = ", ")), file = runtime_error_log, append = TRUE)
                     return(FALSE)
                   }
                   if (length(db_files) == 1) { # Skip run because output already exists and overwrite is not requested.
+                    clear_runtime_error_log() # Existing valid output is a successful result, so no stale failure log should remain.
                     return(TRUE)
                   }
                 } else { # Overwrite mode: remove prior DB/OUT artifacts before executing.
@@ -1743,13 +1762,18 @@ server <- function(input, output, session) {
                   rFVS::fvsRun() # Execute FVS simulation.
 
                   post_db_files <- list.files(stand_dir_path, pattern = "\\.db$", full.names = FALSE, ignore.case = TRUE) # Re-check DB outputs after run.
-                  if (length(post_db_files) > 1) { # Treat multiple post-run DBs as failure.
-                    cat(sprintf("[%s] rFVS Runtime Error: Multiple .db files detected after run in %s: %s\n", Sys.time(), stand_dir_path, paste(post_db_files, collapse = ", ")), file = file.path(stand_dir_path, "fvs_runtime_error.log"), append = TRUE)
+                  if (length(post_db_files) == 0) { # A simulation is not successful when it produced no database for Step 3.
+                    cat(sprintf("[%s] rFVS Runtime Error: No .db output was created after fvsRun completed.\n", Sys.time()), file = runtime_error_log, append = TRUE)
                     return(FALSE)
                   }
+                  if (length(post_db_files) > 1) { # Treat multiple post-run DBs as failure.
+                    cat(sprintf("[%s] rFVS Runtime Error: Multiple .db files detected after run in %s: %s\n", Sys.time(), stand_dir_path, paste(post_db_files, collapse = ", ")), file = runtime_error_log, append = TRUE)
+                    return(FALSE)
+                  }
+                  clear_runtime_error_log() # Remove any stale/current error file before recording a successful completion.
                   return(TRUE) # Mark iteration success.
                 }, error = function(e) { # Capture simulation errors to per-stand log.
-                  cat(sprintf("[%s] rFVS Runtime Error: %s\n", Sys.time(), e$message), file = file.path(stand_dir_path, "fvs_runtime_error.log"))
+                  cat(sprintf("[%s] rFVS Runtime Error: %s\n", Sys.time(), e$message), file = runtime_error_log, append = TRUE)
                   return(FALSE) # Mark iteration failure.
                 }, finally = { # Always restore original working directory.
                   setwd(orig_wd)
