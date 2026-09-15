@@ -1597,13 +1597,13 @@ server <- function(input, output, session) {
                     character(1)
                   )
                   c(
-                    sprintf("%-10s%10d", "TimeInt", p_time_int),
+                    sprintf("%-10s%10s%10d", "TimeInt", "", p_time_int),
                     interval_overrides,
                     sprintf("%-10s%10d", "NumCycle", length(cycle_intervals))
                   )
                 } else {
                   c(
-                    sprintf("%-10s%10d", "TimeInt", p_time_int),
+                    sprintf("%-10s%10s%10d", "TimeInt", "", p_time_int),
                     sprintf("%-10s%10d", "NumCycle", p_num_cycles)
                   )
                 }
