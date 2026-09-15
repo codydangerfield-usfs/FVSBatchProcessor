@@ -1394,7 +1394,7 @@ server <- function(input, output, session) {
     
     keyfile_db_path <- resolve_db_path(input$root_dir, input$master_db, slash = "\\") # Resolve Windows-style DB path inserted into keyfiles.
     p_inv_year   <- as.integer(input$inv_year) # Snapshot the requested common simulation start year.
-    p_inv_year_mode <- input$inv_year_mode # Snapshot whether to reset InvYear or preserve it and add pre-growth cycles.
+    p_inv_year_mode <- input$inv_year_mode # Snapshot whether to reset, preserve/grow, or use each database InvYear unchanged.
     p_time_int   <- input$time_int # Snapshot cycle interval setting.
     p_num_cycles <- input$num_cycles # Snapshot total cycle count setting.
     p_cores      <- input$num_cores # Snapshot requested worker core count.
@@ -1479,6 +1479,26 @@ server <- function(input, output, session) {
           type = "error",
           duration = 12
         )
+        return()
+      }
+    } else if (isTRUE(identical(p_inv_year_mode, "database"))) { # Database mode requires InvYear but performs no reset or bridge growth.
+      if (!("INV_YEAR" %in% names(job_queue))) {
+        shinyjs::enable("gen_keyfiles")
+        step_start_gen(NULL)
+        showNotification("Cannot use database inventory years: the selected stand table has no INV_YEAR column.", type = "error", duration = 8)
+        return()
+      }
+      stand_inv_years <- suppressWarnings(as.integer(job_queue$INV_YEAR))
+      if (any(is.na(stand_inv_years))) {
+        shinyjs::enable("gen_keyfiles")
+        step_start_gen(NULL)
+        showNotification("Cannot use database inventory years: one or more queued stands have a missing or invalid INV_YEAR.", type = "error", duration = 8)
+        return()
+      }
+      if (p_num_cycles > 40L) {
+        shinyjs::enable("gen_keyfiles")
+        step_start_gen(NULL)
+        showNotification("Cannot generate keyfiles: FVS supports at most 40 simulation cycles.", type = "error", duration = 8)
         return()
       }
     } else if (p_num_cycles > 40L) {

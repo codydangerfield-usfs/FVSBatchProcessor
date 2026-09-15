@@ -204,17 +204,42 @@ ui <- function(request) {
         numericInput("num_cores", paste0("Compute Cores (Parallel Generation - ", sys_cores, " Available)"), value = def_cores, min = 1, step = 1),
         numericInput("num_cycles", "Simulation Cycles Count", value = 10, min = 1, step = 1),
         numericInput("time_int", "Cycle Time Interval (Years)", value = 10, min = 1, step = 1), # Updated to the detected variant default after the stand table loads.
-        numericInput("inv_year", "Common Simulation Start Year", value = 2024, min = 1900, step = 1),
+        conditionalPanel(
+          condition = "input.inv_year_mode !== 'database'",
+          numericInput("inv_year", "Common Simulation Start Year", value = 2024, min = 1900, step = 1)
+        ),
+        conditionalPanel(
+          condition = "input.inv_year_mode === 'database'",
+          div(
+            class = "form-group shiny-input-container",
+            style = "width: 100%;",
+            tags$label("Simulation Start Year", class = "control-label"),
+            tags$input(
+              type = "text",
+              class = "form-control",
+              value = "InvYear",
+              disabled = NA_character_
+            )
+          )
+        ),
         radioButtons(
           "inv_year_mode",
           "Inventory Year Handling",
           choices = c(
             "Reset each stand to the common start year" = "reset",
-            "Preserve each stand's InvYear and grow to the common start year" = "grow"
+            "Preserve each stand's InvYear and grow to the common start year" = "grow",
+            "Use the original InvYear" = "database"
           ),
           selected = "reset"
         ),
-        helpText("The common start year defaults to the latest InvYear in the selected stand table. Cycle interval defaults to 5 years for SN, NC, OC, and OP variants and 10 years for all other variants; mixed defaults use 10 years. Preserve/grow uses each stand's variant default for bridge cycles, while the selected interval applies after the common start year."),
+        tags$details(
+          style = "margin-top: 10px; margin-bottom: 15px; font-size: 0.9em; color: #555;",
+          tags$summary(strong("ℹ️ Inventory Year Handling"), style = "cursor: pointer;"),
+          tags$div(
+            style = "margin-top: 10px; padding-left: 12px; border-left: 3px solid #18BC9C;",
+            p("The common start year defaults to the latest InvYear in the selected stand table. The reset option overrides every stand to that year. Preserve/grow retains each database InvYear and adds variant-based bridge cycles until it reaches the common start year where the app then uses the user specified interval for the specified number of cycles. Cycle interval defaults to 5 years for SN, NC, OC, and OP variants and 10 years for all other variants; mixed defaults use 10 years. Users can also start the simulations from the stand's original InvYear.")
+          )
+        ),
         hr(),
         actionButton("gen_keyfiles", "Generate Stand Keyfiles", icon = icon("cogs"), class = "btn-primary w-100 mb-2"),
         div(
