@@ -201,7 +201,7 @@ ui <- function(request) {
       conditionalPanel(
         condition = "input.main_tabs == 'tab3'",
         h5("Keyfile Parameters"),
-        numericInput("num_cores", paste0("Compute Cores (Parallel Generation - ", sys_cores, " Available)"), value = def_cores, min = 1, step = 1),
+        numericInput("num_cores", paste0("Compute Cores (Parallel Generation - ", sys_cores, " Available)"), value = def_cores_keyfiles, min = 1, max = sys_cores, step = 1),
         numericInput("num_cycles", "Simulation Cycles Count", value = 10, min = 1, step = 1),
         numericInput("time_int", "Cycle Time Interval (Years)", value = 10, min = 1, step = 1), # Updated to the detected variant default after the stand table loads.
         conditionalPanel(
@@ -251,7 +251,7 @@ ui <- function(request) {
       conditionalPanel(
         condition = "input.main_tabs == 'tab4'",
         h5("Simulation Parameters"),
-        numericInput("num_cores_rfvs", paste0("Compute Cores (Parallel Execution - ", sys_cores, " Available)"), value = def_cores, min = 1, step = 1),
+        numericInput("num_cores_rfvs", paste0("Compute Cores (Parallel Execution - ", sys_cores, " Available)"), value = def_cores_pipeline, min = 1, max = sys_cores, step = 1),
         hr(),
         h5("FVS Install Location"),
         textInput("bin_loc", "FVS Bin Path (Executable Location)", value = "C:/FVS/FVSSoftware/FVSbin"),
@@ -280,7 +280,7 @@ ui <- function(request) {
       conditionalPanel(
         condition = "input.main_tabs == 'tab5'",
         h5("Consolidate Outputs"),
-        numericInput("num_cores_merge", paste0("Compute Cores (Parallel Consolidation - ", sys_cores, " Available)"), value = def_cores, min = 1, step = 1),
+        numericInput("num_cores_merge", paste0("Compute Cores (Parallel Consolidation - ", sys_cores, " Available)"), value = def_cores_pipeline, min = 1, max = sys_cores, step = 1),
         hr(),
         p("Merge individual stand databases into Group/Scenario databases, and then combine them all into a single master database."),
         hr(),

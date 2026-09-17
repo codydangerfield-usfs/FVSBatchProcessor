@@ -29,7 +29,7 @@ server <- function(input, output, session) {
     sprintf("%02d:%02d:%02d", hh, mm, ss) # Return zero-padded HH:MM:SS string.
   }
 
-  resolve_worker_count <- function(total_tasks, requested_cores, workload = c("heavy", "light")) { # Size worker pools from useful work rather than the configured maximum alone.
+  resolve_worker_count <- function(total_tasks, requested_cores, workload = c("heavy", "light")) { # Never create more workers than requested or useful tasks.
     workload <- match.arg(workload)
     total_tasks <- suppressWarnings(as.integer(total_tasks))
     requested_cores <- suppressWarnings(as.integer(requested_cores))
@@ -37,13 +37,7 @@ server <- function(input, output, session) {
     if (length(requested_cores) != 1L || is.na(requested_cores) || requested_cores < 1L) requested_cores <- 1L
 
     useful_limit <- min(total_tasks, requested_cores) # Never provision more workers than tasks or the user's selected limit.
-    if (useful_limit <= 1L || identical(workload, "heavy")) return(as.integer(useful_limit)) # Expensive rFVS tasks benefit from every useful worker.
-
-    # Keyfile writes are lightweight and can become slower when PSOCK startup and
-    # network-file contention exceed the work itself. Square-root scaling keeps
-    # small queues small while increasing parallelism steadily for large queues.
-    scaled_limit <- max(2L, as.integer(ceiling(sqrt(total_tasks))))
-    as.integer(min(useful_limit, scaled_limit))
+    as.integer(useful_limit) # Honor each stage's independent user setting, including the eight-worker keyfile default.
   }
 
   variant_default_cycle_length <- function(variants) { # Return USDA fvsOL default cycle lengths from raw or FVS-prefixed variant codes.
@@ -74,31 +68,6 @@ server <- function(input, output, session) {
 
   # --- UI BUTTON BROWSER EVENT OBSERVERS ---
   
-  # Sync compute cores across tabs so changing one updates the others
-  observeEvent(input$num_cores, {
-    val <- input$num_cores
-    if (!is.null(val) && !is.na(val)) {
-      if (!identical(val, isolate(input$num_cores_rfvs))) updateNumericInput(session, "num_cores_rfvs", value = val)
-      if (!identical(val, isolate(input$num_cores_merge))) updateNumericInput(session, "num_cores_merge", value = val)
-    }
-  }, ignoreInit = TRUE)
-
-  observeEvent(input$num_cores_rfvs, {
-    val <- input$num_cores_rfvs
-    if (!is.null(val) && !is.na(val)) {
-      if (!identical(val, isolate(input$num_cores))) updateNumericInput(session, "num_cores", value = val)
-      if (!identical(val, isolate(input$num_cores_merge))) updateNumericInput(session, "num_cores_merge", value = val)
-    }
-  }, ignoreInit = TRUE)
-
-  observeEvent(input$num_cores_merge, {
-    val <- input$num_cores_merge
-    if (!is.null(val) && !is.na(val)) {
-      if (!identical(val, isolate(input$num_cores))) updateNumericInput(session, "num_cores", value = val)
-      if (!identical(val, isolate(input$num_cores_rfvs))) updateNumericInput(session, "num_cores_rfvs", value = val)
-    }
-  }, ignoreInit = TRUE)
-
   # Use the user's active session wd instead of the package directory.
   dynamic_wd <- getShinyOption("FVS_USER_WD", default = getwd())
 
