@@ -811,11 +811,7 @@ create_lookup_wb <- function(df_export, meta_info, scenario_cols = NULL) {
 sys_cores <- parallel::detectCores()
 if (is.na(sys_cores)) sys_cores <- 1
 def_cores_keyfiles <- max(1L, min(8L, sys_cores)) # Keyfile generation scales well to about eight workers without excessive startup overhead.
-def_cores_pipeline <- if (sys_cores > 40L) { # Large machines reach practical rFVS/merge saturation near 40 workers.
-  max(1L, min(40L, floor(sys_cores / 2L)))
-} else {
-  max(1L, sys_cores - 1L) # Leave one logical core available to the OS and interactive Shiny session.
-}
+def_cores_pipeline <- max(1L, min(40L, floor(sys_cores * 0.75))) # Use 75% of available cores for rFVS/merge, capped at the observed 40-worker saturation point.
 
 
 
