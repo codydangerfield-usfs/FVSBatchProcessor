@@ -338,7 +338,7 @@ ui <- function(request) {
                   )
                 )
               ),
-              hr(),
+              
               h5("KCP Folder Organization:"),
               p("Users must organize their ", code(".kcp"), " files into categorical subfolders within their designated KCP directory (e.g., ", strong("KCP_Catalog"), "). These subfolders dictate the configuration combinations available for building scenarios."),
               p("Importantly, the alphabetical/numerical order of these subfolders dictates the sequence in which the KCP files are appended and read by FVS. We strongly recommend using numbered prefixes (e.g., ", code("01_Global"), ", ", code("02_Calibration"), ", ", code("03_Prescriptions"), ", ", code("04_Outputs"), ") to explicitly control this load order. Ensure your output-generating KCP folder is specified last (numbered highest) so its instructions are executed after all other parameters."),
@@ -394,6 +394,14 @@ ui <- function(request) {
                 #   "Figure 1. End-to-end FVS batch workflow."
                 # )
               ),
+              hr(),
+              h5("Default Core Selection:"),
+              p("Each processing stage has an independent, user-adjustable core setting. The defaults balance parallel performance against cluster startup overhead and resource saturation:"),
+              tags$ul(
+                tags$li(strong("Keyfile generation: "), "Uses up to 8 cores (or all available cores when fewer than 8 are available). Keyfiles are generated in parallel, but adding more workers is likely to increase cluster startup overhead without meaningfully reducing processing time."),
+                tags$li(strong("rFVS execution and database merging: "), "On machines with 40 or fewer cores, each stage defaults to the available cores minus one, leaving one core available for the operating system and Shiny session. On machines with more than 40 cores, each stage defaults to half of the available cores, capped at 40, because performance typically reaches a saturation point near 40 workers.")
+              ),
+              p(strong("Note: "), "These values are defaults only. Users can independently change the core selection for each stage to best match their system and workload."),
               hr(),
               h5("Author"),
               p(strong("Cody Dangerfield")),
