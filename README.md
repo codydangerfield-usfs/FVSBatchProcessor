@@ -4,6 +4,9 @@
 
 <img src="inst/www/FVS_Hex_Sticker.png" alt="FVSBatchProcessor hex sticker" width="200" align="right">
 
+
+![FVS batch processing workflow](inst/www/FVS_BatchProcessing_WorkflowDiagram.png)
+
 ### Install
 
 ```r
@@ -31,4 +34,3 @@ fvsRunBatch()
 - `R/fvsRunBatch.R`: exported app launcher
 - `inst/www/`: packaged static assets
 
-![FVS batch processing workflow](inst/www/FVS_BatchProcessing_WorkflowDiagram.png)
