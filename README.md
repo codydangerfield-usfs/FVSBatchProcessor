@@ -1,12 +1,12 @@
 # FVSBatchProcessor
 
-<img src="inst/www/FVS_Hex_Sticker.png" alt="FVSBatchProcessor hex sticker" width="200" align="right">
-
 `FVSBatchProcessor` packages the FVS batch-processing Shiny app for GitHub installation.
 
 ![FVS batch processing workflow](inst/www/FVS_BatchProcessing_WorkflowDiagram.png)
 
 ## Install
+
+<img src="inst/www/FVS_Hex_Sticker.png" alt="FVSBatchProcessor hex sticker" width="200" align="right">
 
 ```r
 install.packages("remotes")
@@ -14,6 +14,8 @@ remotes::install_github("https://github.com/codydangerfield-usfs/FVSBatchProcess
 ```
 
 `rFVS` is a required dependency and is declared in `Remotes`, so it will be installed automatically from USDA Forest Service when installing this package from GitHub.
+
+<br clear="right">
 
 ## Run
 
