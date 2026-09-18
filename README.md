@@ -5,7 +5,6 @@
 <img src="inst/www/FVS_Hex_Sticker.png" alt="FVSBatchProcessor hex sticker" width="200" align="right">
 
 
-![FVS batch processing workflow](inst/www/FVS_BatchProcessing_WorkflowDiagram.png)
 
 ### Install
 
@@ -25,6 +24,8 @@ library(FVSBatchProcessor)
 setwd(<FVS_Project_Folder>)
 fvsRunBatch()
 ```
+
+![FVS batch processing workflow](inst/www/FVS_BatchProcessing_WorkflowDiagram.png)
 
 ## Project Layout
 
