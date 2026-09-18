@@ -1,8 +1,18 @@
-# FVSBatchProcessor
+# FVSBatchProcessor 
 
+
+
+`FVSBatchProcessor` packages the FVS batch-processing Shiny app for GitHub installation. <img src="inst/www/FVS_Hex_Sticker.png" alt="FVSBatchProcessor hex sticker" width="200" align="right">
+
+
+
+
+<<<<<<< HEAD
 `FVSBatchProcessor` packages the FVS batch-processing Shiny app for GitHub installation.
+=======
 
-![FVS batch processing workflow](inst/www/FVS_BatchProcessing_WorkflowDiagram.png)
+>>>>>>> 40258eb64bc02b268608ab90fc85b63847c3b1cd
+
 
 <img src="inst/www/FVS_Hex_Sticker.png" alt="FVSBatchProcessor hex sticker" width="200">
 
@@ -30,3 +40,5 @@ fvsRunBatch()
 - `R/app_server.R`: server logic
 - `R/fvsRunBatch.R`: exported app launcher
 - `inst/www/`: packaged static assets
+
+![FVS batch processing workflow](inst/www/FVS_BatchProcessing_WorkflowDiagram.png)
