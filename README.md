@@ -1,5 +1,7 @@
 # FVSBatchProcessor
 
+<img src="inst/www/FVS_Hex_Sticker.png" alt="FVSBatchProcessor hex sticker" width="200" align="right">
+
 `FVSBatchProcessor` packages the FVS batch-processing Shiny app for GitHub installation.
 
 ![FVS batch processing workflow](inst/www/FVS_BatchProcessing_WorkflowDiagram.png)
