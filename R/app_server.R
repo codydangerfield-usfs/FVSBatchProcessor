@@ -1600,9 +1600,9 @@ server <- function(input, output, session) {
                   mgmt_id,
                   timing_keywords,
                   "",
-                  stack_block,
-                  "",
                   database_keywords,
+                  "",
+                  stack_block,
                   "",
                   "Process",
                   "Stop"
