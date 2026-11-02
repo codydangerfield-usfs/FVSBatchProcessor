@@ -3,6 +3,95 @@ server <- function(input, output, session) {
   bg_gen <- reactiveVal(NULL) # Holds Step 1 background process handle (`callr::r_bg` object).
   bg_run <- reactiveVal(NULL) # Holds Step 2 background process handle.
   bg_merge <- reactiveVal(NULL) # Holds Step 3 background process handle.
+  run_status_dir <- reactiveVal(NULL) # Holds transient per-worker active-job status files for Step 2.
+  run_log_path <- reactiveVal(NULL) # Holds the live Step 2 job-log path.
+  handled_job_events <- new.env(parent = emptyenv()) # Tracks status events that could not be removed after application.
+  handled_job_events$paths <- character(0)
+  run_log_status_offsets <- new.env(parent = emptyenv()) # Byte offsets for each job's fixed-width status field.
+  run_log_status_offsets$values <- numeric(0)
+  run_log_job_states <- new.env(parent = emptyenv()) # Current state of each queued job, used to prevent stale status regressions.
+  run_log_job_states$values <- character(0)
+  active_worker_display <- reactiveVal("Active rFVS Runs: none.") # Current live worker/stand summary shown in Step 2.
+
+  apply_job_log_status_batch <- function(log_path, job_indices, statuses) { # Apply many fixed-width status changes through one open log connection.
+    allowed_statuses <- c("QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED")
+    if (is.null(log_path) || !nzchar(log_path) || length(job_indices) != length(statuses)) return(rep(FALSE, length(job_indices)))
+    status_offsets <- run_log_status_offsets$values
+    job_states <- run_log_job_states$values
+    state_rank <- c(QUEUED = 0L, RUNNING = 1L, COMPLETED = 2L, FAILED = 2L, CANCELLED = 2L)
+    update_results <- rep(FALSE, length(job_indices))
+    write_positions <- integer(length(job_indices))
+    write_count <- 0L
+    for (position in seq_along(job_indices)) {
+      job_index <- suppressWarnings(as.integer(job_indices[position]))
+      status <- as.character(statuses[position])
+      if (is.na(job_index) || job_index < 1L || job_index > length(status_offsets) || !(status %in% allowed_statuses)) next
+      current_status <- job_states[job_index]
+      if (length(current_status) == 1L && !is.na(current_status) && current_status %in% names(state_rank) && state_rank[[current_status]] >= state_rank[[status]]) {
+        update_results[position] <- TRUE
+      } else {
+        write_count <- write_count + 1L
+        write_positions[write_count] <- position
+      }
+    }
+    write_positions <- write_positions[seq_len(write_count)]
+    if (length(write_positions) == 0L) return(update_results)
+    log_con <- tryCatch(file(log_path, open = "r+b"), error = function(e) NULL)
+    if (is.null(log_con)) return(update_results)
+    tryCatch({
+      for (position in write_positions) {
+        job_index <- as.integer(job_indices[position])
+        status <- as.character(statuses[position])
+        updated <- tryCatch({
+          seek(log_con, where = status_offsets[job_index], origin = "start", rw = "write")
+          writeBin(charToRaw(sprintf("%-9s", status)), log_con)
+          TRUE
+        }, error = function(e) FALSE)
+        if (isTRUE(updated)) {
+          job_states[job_index] <- status
+          update_results[position] <- TRUE
+        }
+      }
+    }, finally = close(log_con))
+    run_log_job_states$values <- job_states
+    update_results
+  }
+
+  update_job_log_status <- function(log_path, job_index, status) { # Update one fixed-width status field without adding another job line.
+    isTRUE(apply_job_log_status_batch(log_path, job_index, status)[1L])
+  }
+
+  update_job_log_statuses <- function(status_dir, log_path) { # Apply worker status events to the existing job rows.
+    if (is.null(status_dir) || !dir.exists(status_dir) || is.null(log_path) || !nzchar(log_path)) return(invisible(NULL))
+    event_paths <- list.files(status_dir, pattern = "^job_status_.*\\.txt$", full.names = TRUE)
+    pending_paths <- setdiff(event_paths, handled_job_events$paths)
+    valid_paths <- character(length(pending_paths))
+    job_indices <- integer(length(pending_paths))
+    statuses <- character(length(pending_paths))
+    event_count <- 0L
+    for (event_path in pending_paths) {
+      event <- tryCatch(suppressWarnings(readLines(event_path, warn = FALSE)), error = function(e) character(0))
+      if (length(event) < 2L || !(event[1] %in% c("COMPLETED", "FAILED"))) next
+      job_index <- suppressWarnings(as.integer(event[2]))
+      event_count <- event_count + 1L
+      valid_paths[event_count] <- event_path
+      job_indices[event_count] <- job_index
+      statuses[event_count] <- event[1]
+    }
+    if (event_count > 0L) {
+      valid_paths <- valid_paths[seq_len(event_count)]
+      job_indices <- job_indices[seq_len(event_count)]
+      statuses <- statuses[seq_len(event_count)]
+      status_results <- apply_job_log_status_batch(log_path, job_indices, statuses)
+      resolved_paths <- valid_paths[status_results]
+      if (length(resolved_paths) > 0L) {
+        try(unlink(resolved_paths, force = TRUE), silent = TRUE)
+        failed_removals <- resolved_paths[file.exists(resolved_paths)]
+        if (length(failed_removals) > 0L) handled_job_events$paths <- unique(c(handled_job_events$paths, failed_removals))
+      }
+    }
+    invisible(NULL)
+  }
 
   step_start_gen <- reactiveVal(NULL) # Stores Step 1 start time for elapsed-time formatting.
   step_start_run <- reactiveVal(NULL) # Stores Step 2 start time.
@@ -10,13 +99,28 @@ server <- function(input, output, session) {
   active_gen_total <- reactiveVal(NULL) # Snapshots the Step 1 queue size for stable progress reporting.
   active_run_total <- reactiveVal(NULL) # Snapshots the Step 2 queue size for stable progress reporting.
   active_run_is_test <- reactiveVal(FALSE) # Records whether the active Step 2 process uses the sampled queue.
-  
   gen_prog <- NULL # UI progress modal instance for Step 1.
   run_prog <- NULL # UI progress modal instance for Step 2.
   merge_prog <- NULL # UI progress modal instance for Step 3.
+
+  update_run_progress_from_file <- function() { # Read the same worker-written progress file used by the reference app.
+    total_jobs <- isolate(active_run_total())
+    if (is.null(run_prog) || is.null(total_jobs) || total_jobs < 1L || !file.exists(prog_file_run)) return(invisible(NULL))
+    progress_lines <- tryCatch(suppressWarnings(readLines(prog_file_run, warn = FALSE)), error = function(e) character(0))
+    if (length(progress_lines) == 0L) return(invisible(NULL))
+    parts <- strsplit(progress_lines[length(progress_lines)], "\\|", fixed = FALSE)[[1]]
+    if (length(parts) < 2L) return(invisible(NULL))
+    completed <- suppressWarnings(as.numeric(parts[1]))
+    if (!is.finite(completed)) return(invisible(NULL))
+    run_prog$set(
+      value = min(1, max(0, completed / total_jobs)),
+      detail = paste(parts[-1], collapse = "|")
+    )
+    invisible(NULL)
+  }
   
   prog_file_gen <- tempfile(pattern = "gen_", fileext = ".txt") # Step 1 progress handoff file (worker -> UI poller).
-  prog_file_run <- tempfile(pattern = "run_", fileext = ".txt") # Step 2 progress handoff file.
+  prog_file_run <- tempfile(pattern = "run_", fileext = ".txt") # Step 2 progress handoff file (worker -> UI poller).
   prog_file_merge <- tempfile(pattern = "merge_", fileext = ".txt") # Step 3 progress handoff file.
 
   format_elapsed <- function(start_time) { # Convert a start timestamp into HH:MM:SS elapsed text.
@@ -80,6 +184,14 @@ server <- function(input, output, session) {
     path <- trimws(as.character(path)) # Coerce to trimmed string.
     if (!nzchar(path)) path <- fallback # Replace blank input with runtime fallback directory.
     normalizePath(path, winslash = "/", mustWork = FALSE) # Normalize separators without requiring physical existence.
+  }
+
+  ensure_run_logs_dir <- function(root_dir) { # Create and verify the persistent Step 2 log directory for the selected project root.
+    normalized_root <- normalize_dir_input(root_dir, fallback = dynamic_wd)
+    logs_dir <- file.path(normalized_root, "rFVS_Runs", "logs")
+    dir.create(logs_dir, recursive = TRUE, showWarnings = FALSE)
+    if (!dir.exists(logs_dir)) stop(sprintf("Could not create the log directory: %s", logs_dir))
+    normalizePath(logs_dir, winslash = "/", mustWork = TRUE)
   }
 
   observeEvent(input$browse_db, { # Open native file picker for Database selection.
@@ -715,7 +827,7 @@ server <- function(input, output, session) {
     # Auto-export the default setup files
     tryCatch({ # Best-effort export of helper files without blocking UI on failure.
       out_dir <- file.path(input$root_dir, "rFVS_Runs") # Define run output directory.
-      if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE, showWarnings = FALSE) # Create run directory if missing.
+      ensure_run_logs_dir(input$root_dir) # Create rFVS_Runs and its logs subdirectory together when workflow outputs begin.
       
       auto_wb_path <- file.path(out_dir, "KCP_Lookup_Table.xlsx") # Define default lookup workbook path.
       if (!file.exists(auto_wb_path)) { # Only generate workbook when one does not already exist.
@@ -1207,7 +1319,7 @@ server <- function(input, output, session) {
       
       m_file <- manifest_path() # Resolve manifest CSV output path.
       run_base_dir <- dirname(m_file) # Resolve containing output folder.
-      if (!dir.exists(run_base_dir)) dir.create(run_base_dir, recursive = TRUE, showWarnings = FALSE) # Ensure output directory exists.
+      ensure_run_logs_dir(input$root_dir) # Create rFVS_Runs and its logs subdirectory together before saving the manifest.
       
       tryCatch(
         write.csv(final_manifest_df, m_file, row.names = FALSE, na = ""), # Write compiled manifest to disk.
@@ -1309,10 +1421,47 @@ server <- function(input, output, session) {
     run_mode <- if (isTRUE(input$test_run_mode)) "TEST — first stand per GROUP_CODE/Scenario" else "FULL"
     planned_workers <- resolve_worker_count(nrow(jq), input$num_cores_rfvs, workload = "heavy") # Preview all useful workers based on the actual full or sampled execution queue.
     sprintf( # Return success summary with queue size, cores, and variant inventory.
-      "Pipeline Status: Active Ready Queue\n - Master Database Found: %s\n - Execution Mode: %s\n - Full Cross-Join Queue: %d active tasks\n - Current Execution Queue: %d active tasks\n - Workers Planned: %d of %d requested\n - Detected FVS Variants: %s (%d total)\n\n[Ready to dispatch parallel rFVS simulations.]", # Template for lightweight step-2 readiness diagnostics.
-      basename(full_db_path), run_mode, nrow(full_jq), nrow(jq), planned_workers, input$num_cores_rfvs, detected_variants, if ("VARIANT" %in% names(jq)) length(unique(jq$VARIANT)) else 0 # Populate summary with queue and worker details.
+      "Pipeline Status: Active Ready Queue\n - Master Database Found: %s\n - Execution Mode: %s\n - Full Cross-Join Queue: %d active tasks\n - Current Execution Queue: %d active tasks\n - Workers Planned: %d of %d requested\n - Detected FVS Variants: %s (%d total)\n - Completion Logs: %s \n\n[Ready to dispatch parallel rFVS simulations.]", # Template for lightweight step-2 readiness diagnostics.
+      basename(full_db_path), run_mode, nrow(full_jq), nrow(jq), planned_workers, input$num_cores_rfvs, detected_variants, if ("VARIANT" %in% names(jq)) length(unique(jq$VARIANT)) else 0, # Populate summary with queue and worker details.
+      file.path(input$root_dir, "rFVS_Runs", "logs")
     )
   })
+
+  observe({ # Poll lightweight per-worker files and publish active stand snapshots without querying the database.
+    invalidateLater(500, session) # Check active assignments and completed-job events twice per second.
+    status_dir <- run_status_dir()
+    active_display_lines <- character(0)
+    if (!is.null(status_dir) && dir.exists(status_dir)) {
+      update_job_log_statuses(status_dir, run_log_path()) # Update each finished job row as soon as its worker reports it.
+      status_files <- list.files(status_dir, pattern = "^worker_.*\\.txt$", full.names = TRUE)
+      status_records <- lapply(status_files, function(path) {
+        tryCatch(suppressWarnings(readLines(path, warn = FALSE)), error = function(e) character(0))
+      })
+      valid_records <- which(vapply(status_records, function(record) length(record) >= 5 && identical(record[1], "RUNNING"), logical(1)))
+      if (length(valid_records) > 0) {
+        running_job_indices <- vapply(valid_records, function(index) suppressWarnings(as.integer(status_records[[index]][5])), integer(1))
+        running_job_indices <- unique(running_job_indices[!is.na(running_job_indices)])
+        if (length(running_job_indices) > 0L) apply_job_log_status_batch(run_log_path(), running_job_indices, rep("RUNNING", length(running_job_indices)))
+        active_display_lines <- vapply(valid_records, function(index) {
+          record <- status_records[[index]]
+          started_at <- as.POSIXct(record[2], format = "%Y-%m-%d %H:%M:%S")
+          sprintf(" - Scenario=%s | STAND_ID=%s | Running %s",
+                  record[3], record[4], format_elapsed(started_at))
+        }, character(1))
+      }
+    }
+    run_proc <- bg_run()
+    run_is_active <- !is.null(run_proc) && isTRUE(tryCatch(run_proc$is_alive(), error = function(e) FALSE))
+    if (length(active_display_lines) > 0) {
+      active_worker_display(paste(c("Active rFVS Runs:", active_display_lines), collapse = "\n"))
+    } else if (run_is_active) {
+      active_worker_display("Active rFVS Runs: initializing jobs.")
+    } else {
+      active_worker_display("Active rFVS Runs: none.")
+    }
+  })
+
+  output$rfvs_active_workers <- renderText(active_worker_display()) # Render current worker/stand assignments in the existing Step 2 panel.
   
   output$pipeline_diagnostics_merge <- renderText({ # Render readiness summary for Step 3 output merge.
     manifest_trigger() # Re-render when Save Matrix creates or replaces the manifest, even if it was missing during the prior render.
@@ -1717,31 +1866,83 @@ server <- function(input, output, session) {
     
     p_overwrite <- input$overwrite_scens # User-selected scenarios to force rerun/overwrite.
     if (is.null(p_overwrite)) p_overwrite <- character(0) # Normalize NULL input to empty character vector.
+    p_run_timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S") # Use a filename-safe local timestamp so every run keeps its own report.
+    p_run_logs_dir <- NULL
+    p_run_log <- NULL
+    p_run_status_dir <- NULL
+    p_run_started <- format(Sys.time(), "%Y-%m-%d %H:%M:%S") # Record the start time in the pre-run report.
+    p_run_mode <- if (p_is_test) "TEST" else "FULL" # Record the selected mode in the pre-run report.
+    log_ready <- tryCatch({ # Create a new completion log before starting workers.
+      p_run_logs_dir <- ensure_run_logs_dir(input$root_dir) # Recheck immediately before writing in case the folder was removed after startup.
+      p_run_unique_id <- substr(gsub("-", "", uuid::UUIDgenerate()), 1L, 8L)
+      p_run_log <- file.path(
+        p_run_logs_dir,
+        paste0("rFVS_engine_", p_run_timestamp, "_", p_run_unique_id, ".log")
+      ) # Append `.log` explicitly after the timestamp and collision-safe run ID.
+      p_run_status_dir <- tempfile(pattern = "rFVS_active_", tmpdir = p_run_logs_dir) # Isolated live status directory; workers never contend on one status file.
+      if (!dir.create(p_run_status_dir, recursive = TRUE, showWarnings = FALSE) && !dir.exists(p_run_status_dir)) {
+        stop("Could not create the temporary active-worker status directory.")
+      }
+      safe_log_value <- function(value) gsub("[|\r\n]+", " ", as.character(value)) # Keep queue fields on one line without changing letters.
+      queue_for_log <- job_queue[order(job_queue$VARIANT, job_queue$Scenario, job_queue$STAND_ID), , drop = FALSE] # Match the dispatch order used by the background process.
+      queued_lines <- sprintf("%-9s | Scenario=%s | STAND_ID=%s",
+                              "QUEUED",
+                              safe_log_value(queue_for_log$Scenario),
+                              safe_log_value(queue_for_log$STAND_ID))
+      log_header <- c(
+        "# Step 2 rFVS job report",
+        sprintf("# Run started: %s", p_run_started),
+        sprintf("# Execution mode: %s", p_run_mode),
+        "Status    | Scenario | STAND_ID"
+      )
+      log_lines <- c(log_header, queued_lines)
+      log_line_lengths <- nchar(enc2utf8(log_lines), type = "bytes") + 1L # Include each UTF-8 newline when calculating row offsets.
+      log_line_offsets <- c(0, head(cumsum(log_line_lengths), -1L))
+      queue_row_indices <- seq.int(length(log_header) + 1L, length(log_lines))
+      new_log_content <- paste0(enc2utf8(log_lines), collapse = "\n")
+      log_con <- file(p_run_log, open = "wb")
+      tryCatch(writeBin(charToRaw(paste0(new_log_content, "\n")), log_con), finally = close(log_con)) # Recreate the run log with one mutable status row per queued job.
+      run_log_status_offsets$values <- as.double(log_line_offsets[queue_row_indices]) # Status field starts at the beginning of each job row.
+      run_log_job_states$values <- rep("QUEUED", nrow(queue_for_log)) # Initialize every job row as queued.
+      TRUE
+    }, error = function(e) e$message) # Preserve the write failure for a useful UI notification.
+    if (!isTRUE(log_ready)) { # Do not begin a run if its requested log cannot be created.
+      if (!is.null(p_run_status_dir) && dir.exists(p_run_status_dir)) unlink(p_run_status_dir, recursive = TRUE, force = TRUE)
+      shinyjs::enable("run_rfvs")
+      shinyjs::hide("kill_run_btn_wrap")
+      step_start_run(NULL)
+      showNotification(paste("Could not prepare Step 2 logging and active-worker status:", log_ready), type = "error", duration = 10)
+      return()
+    }
+    run_status_dir(p_run_status_dir) # Let the existing Step 2 diagnostics render live worker assignments.
+    run_log_path(p_run_log) # Let the polling observer append completion events to this run's log.
+    handled_job_events$paths <- character(0) # Start with no status events recorded for this fresh run.
+    active_worker_display("Active rFVS Runs: initializing.")
     active_run_total(total_jobs) # Freeze the progress denominator for this background process.
     active_run_is_test(p_is_test) # Freeze the mode label for completion reporting.
 
     shinyjs::show("kill_run_btn_wrap") # Show cancel button once background process starts.
     
-    writeLines("0|Booting up compute cluster (this may take a moment)...", prog_file_run) # Seed progress file consumed by UI poller.
+    writeLines("0|Booting up compute cluster (this may take a moment)...", prog_file_run) # Seed progress file consumed by the Step 2 UI poller.
     run_prog <<- shiny::Progress$new(session, min=0, max=1) # Open progress modal for Step 2.
     run_prog$set(message = "Executing : Dispatching Parallel rFVS Runs...", value=0, detail = "Booting up compute cluster (this may take a moment)...") # Initialize visible progress text.
     
-    p <- callr::r_bg(function(job_queue, p_cores, p_bin_loc, p_overwrite, prog_file, total_jobs) { # Execute compute-heavy simulation loop in background R process.
+    p <- callr::r_bg(function(job_queue, p_cores, p_bin_loc, p_overwrite, p_run_status_dir, prog_file, total_jobs) { # Execute compute-heavy simulation loop in background R process.
       library(parallel) # Provides cluster worker creation.
-      library(doSNOW) # Provides foreach backend with progress hooks.
+      library(doSNOW) # Provides the foreach backend for the parallel cluster.
       library(rFVS) # Provides FVS runtime interface.
 
       # Keep workers in same-variant streaks to reduce repeated fvsLoad() calls.
       job_queue <- job_queue[order(job_queue$VARIANT, job_queue$Scenario, job_queue$STAND_ID), , drop = FALSE]
+      writeLines("0|Initializing FVS binaries mapped to worker RAM...", prog_file) # Match the reference startup progress stage.
 
-      writeLines("0|Initializing FVS binaries mapped to worker RAM...", prog_file) # Emit startup status before dispatch.
       cl <- NULL # Hold an optional PSOCK cluster when the queue contains multiple runs.
       if (p_cores > 1L) {
         cl <- makeCluster(p_cores) # Start no more workers than there are executable jobs.
         on.exit(try(stopCluster(cl), silent = TRUE), add = TRUE) # Always tear down workers on exit.
         registerDoSNOW(cl) # Route foreach iterations to active cluster.
 
-        clusterExport(cl, c("p_bin_loc", "p_overwrite"), envir = environment()) # Share binary path and overwrite preferences with workers.
+        clusterExport(cl, c("p_bin_loc", "p_overwrite", "p_run_status_dir"), envir = environment()) # Share run settings and the isolated status directory with workers.
         clusterEvalQ(cl, { # Initialize worker-local state once per worker process.
           library(rFVS) # Load rFVS inside each worker.
           .fvs_worker_state <- new.env(parent = emptyenv()) # Create lightweight worker cache.
@@ -1755,27 +1956,56 @@ server <- function(input, output, session) {
         writeLines("0|Running the single simulation without cluster startup...", prog_file)
       }
 
-      last_update <- Sys.time() # Throttle progress-file writes.
-      progress_callback_rfvs <- function(n) { # Called by doSNOW as iterations complete.
-        if (as.numeric(difftime(Sys.time(), last_update, units = "secs")) > 0.5 || n == total_jobs) { # Update about twice per second or on final iteration.
-          writeLines(sprintf("%d|Processed %d of %d simulation binaries via worker clusters...", n, n, total_jobs), prog_file) # Persist progress for UI polling observer.
-          last_update <<- Sys.time() # Reset throttle timestamp.
+      last_update <- Sys.time() # Throttle progress-file writes to keep updates responsive without a write per job.
+      progress_callback_rfvs <- function(n) { # Called by doSNOW after completed loop iterations.
+        if (as.numeric(difftime(Sys.time(), last_update, units = "secs")) > 0.25 || n == total_jobs) { # Update four times per second or on the final iteration.
+          writeLines(sprintf("%d|Processed %d of %d simulations via workers...", n, n, total_jobs), prog_file) # Persist machine-readable progress for the Shiny poller.
+          last_update <<- Sys.time() # Reset the throttle timestamp.
         }
       }
 
       conns_before <- as.integer(rownames(showConnections(all = FALSE))) # Snapshot open R connections for cleanup bookkeeping.
 
             run_results <- foreach(i = seq_len(total_jobs), # Parallel outer loop: one iteration per stand run directory.
-              .packages = c("rFVS"), # Ensure worker has required package namespace.
-              .options.snow = if (p_cores > 1L) list(progress = progress_callback_rfvs) else NULL) %dopar% { # Attach progress only when the snow backend is active.
+              .packages = c("rFVS"), # Ensure each task has the rFVS namespace.
+              .options.snow = if (p_cores > 1L) list(progress = progress_callback_rfvs) else NULL) %dopar% { # Match the reference progress callback for a SNOW cluster.
 
                 stand_dir_path <- job_queue$stand_dir[i] # Stand-specific working directory containing `run.key`.
                 variant_i <- job_queue$VARIANT[i] # Variant program token for rFVS::fvsLoad.
                 scenario_i <- job_queue$Scenario[i] # Scenario label used for overwrite filtering.
-
+                worker_id <- Sys.getpid()
+                worker_status_file <- file.path(p_run_status_dir, paste0("worker_", worker_id, ".txt"))
+                job_event_file <- file.path(p_run_status_dir, sprintf("job_status_%s_%s.txt", worker_id, i))
+                job_status_state <- new.env(parent = emptyenv())
+                job_status_state$status <- "FAILED"
+                job_status_state$recorded <- FALSE
+                clean_status_value <- function(value) gsub("[\r\n]+", " ", as.character(value)) # Remove line breaks without changing letters.
+                record_job_status <- function(status) {
+                  event_written <- tryCatch({
+                    suppressWarnings(writeLines(c(status, as.character(i)), job_event_file))
+                    TRUE
+                  }, error = function(e) FALSE)
+                  if (isTRUE(event_written)) {
+                    job_status_state$status <- status
+                    job_status_state$recorded <- TRUE
+                  }
+                  invisible(event_written)
+                }
+                try(suppressWarnings(writeLines(c(
+                  "RUNNING",
+                  format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+                  clean_status_value(scenario_i),
+                  clean_status_value(job_queue$STAND_ID[i]),
+                  as.character(i)
+                ), worker_status_file)), silent = TRUE)
+                on.exit({
+                  try(unlink(worker_status_file, force = TRUE), silent = TRUE)
+                  if (!isTRUE(job_status_state$recorded)) record_job_status(job_status_state$status)
+                }, add = TRUE)
                 if (!dir.exists(stand_dir_path)) { # Preserve a visible error record even when Step 1 never created this stand directory.
                   dir.create(stand_dir_path, recursive = TRUE, showWarnings = FALSE)
                   cat(sprintf("[%s] rFVS Runtime Error: Expected stand run directory and run.key were not created before Step 2.\n", Sys.time()), file = file.path(stand_dir_path, "fvs_runtime_error.log"), append = TRUE)
+                  record_job_status("FAILED")
                   return(FALSE)
                 }
                 runtime_error_log <- file.path(stand_dir_path, "fvs_runtime_error.log") # Use one current-attempt error log per stand run.
@@ -1787,6 +2017,7 @@ server <- function(input, output, session) {
                 clear_runtime_error_log() # Clear errors from a prior attempt before validating or retrying this queued run.
                 if (!file.exists(file.path(stand_dir_path, "run.key"))) { # Fail clearly before invoking rFVS when the expected keyfile is absent.
                   cat(sprintf("[%s] rFVS Runtime Error: Expected run.key was not found in %s.\n", Sys.time(), stand_dir_path), file = runtime_error_log, append = TRUE)
+                  record_job_status("FAILED")
                   return(FALSE)
                 }
 
@@ -1802,6 +2033,7 @@ server <- function(input, output, session) {
                   }, error = function(e) e)
                   if (inherits(variant_load_error, "error")) {
                     cat(sprintf("[%s] rFVS Variant Load Error (%s): %s\n", Sys.time(), variant_i, variant_load_error$message), file = runtime_error_log, append = TRUE)
+                    record_job_status("FAILED")
                     return(FALSE) # Isolate a bad variant/load failure to this task instead of terminating the entire queue.
                   }
                   .GlobalEnv$.fvs_worker_state$active_variant <- variant_i # Cache loaded variant to avoid redundant fvsLoad.
@@ -1814,10 +2046,12 @@ server <- function(input, output, session) {
                 if (!is_overwrite) { # Reuse mode: do not rerun when a valid single DB already exists.
                   if (length(db_files) > 1) { # Multiple DBs indicate ambiguous prior output state.
                     cat(sprintf("[%s] rFVS Runtime Error: Found multiple .db files in %s: %s\n", Sys.time(), stand_dir_path, paste(db_files, collapse = ", ")), file = runtime_error_log, append = TRUE)
+                    record_job_status("FAILED")
                     return(FALSE)
                   }
                   if (length(db_files) == 1) { # Skip run because output already exists and overwrite is not requested.
                     clear_runtime_error_log() # Existing valid output is a successful result, so no stale failure log should remain.
+                    record_job_status("COMPLETED")
                     return(TRUE)
                   }
                 } else { # Overwrite mode: remove prior DB/OUT artifacts before executing.
@@ -1837,27 +2071,41 @@ server <- function(input, output, session) {
                   post_db_files <- list.files(stand_dir_path, pattern = "\\.db$", full.names = FALSE, ignore.case = TRUE) # Re-check DB outputs after run.
                   if (length(post_db_files) == 0) { # A simulation is not successful when it produced no database for Step 3.
                     cat(sprintf("[%s] rFVS Runtime Error: No .db output was created after fvsRun completed.\n", Sys.time()), file = runtime_error_log, append = TRUE)
+                    record_job_status("FAILED")
                     return(FALSE)
                   }
                   if (length(post_db_files) > 1) { # Treat multiple post-run DBs as failure.
                     cat(sprintf("[%s] rFVS Runtime Error: Multiple .db files detected after run in %s: %s\n", Sys.time(), stand_dir_path, paste(post_db_files, collapse = ", ")), file = runtime_error_log, append = TRUE)
+                    record_job_status("FAILED")
                     return(FALSE)
                   }
                   clear_runtime_error_log() # Remove any stale/current error file before recording a successful completion.
+                  record_job_status("COMPLETED")
                   return(TRUE) # Mark iteration success.
                 }, error = function(e) { # Capture simulation errors to per-stand log.
                   cat(sprintf("[%s] rFVS Runtime Error: %s\n", Sys.time(), e$message), file = runtime_error_log, append = TRUE)
+                  record_job_status("FAILED")
                   return(FALSE) # Mark iteration failure.
                 }, finally = { # Always restore original working directory.
                   setwd(orig_wd)
                 })
               }
 
+      final_progress_line <- sprintf("%d|Processed %d of %d simulation binaries...", total_jobs, total_jobs, total_jobs)
+      for (attempt in seq_len(5L)) { # Retry the final progress write if Shiny is reading the file at the same moment.
+        progress_written <- tryCatch({
+          writeLines(final_progress_line, prog_file)
+          TRUE
+        }, error = function(e) FALSE)
+        if (isTRUE(progress_written)) break
+        Sys.sleep(0.05)
+      }
       conns_after <- as.integer(rownames(showConnections(all = FALSE))) # Snapshot open connections after parallel work.
       for (cn in setdiff(conns_after, conns_before)) try(close(getConnection(cn)), silent = TRUE) # Close newly opened connections to prevent descriptor leaks.
-      successful_runs <- sum(vapply(run_results, isTRUE, logical(1))) # Count only tasks that actually completed or validly reused output.
+      successful_flags <- vapply(run_results, isTRUE, logical(1)) # Track completed and validly reused outputs by queue row.
+      successful_runs <- sum(successful_flags) # Count only tasks that actually completed or validly reused output.
       return(list(total = total_jobs, successful = successful_runs, failed = total_jobs - successful_runs)) # Return explicit outcome counts to the parent process.
-    }, args = list(job_queue, p_cores, p_bin_loc, p_overwrite, prog_file_run, total_jobs), supervise = TRUE) # Launch supervised background process with immutable arguments.
+    }, args = list(job_queue, p_cores, p_bin_loc, p_overwrite, p_run_status_dir, prog_file_run, total_jobs), supervise = TRUE) # Launch supervised background process with immutable arguments.
     
     bg_run(p) # Store process handle for progress polling and cancellation observers.
   })
@@ -1865,23 +2113,38 @@ server <- function(input, output, session) {
   observe({
     p <- bg_run()
     req(p)
-    invalidateLater(500, session)
+    invalidateLater(250, session) # Poll progress four times per second for a more responsive bar.
     
     if (p$is_alive()) {
       shinyjs::show("kill_run_btn_wrap")
-      if (file.exists(prog_file_run)) {
-        l <- suppressWarnings(readLines(prog_file_run))
-        if (length(l) > 0) {
-          parts <- strsplit(l[length(l)], "\\|")[[1]]
-          if (length(parts) >= 2 && !is.null(run_prog)) {
-            total_jobs <- isolate(active_run_total())
-            val <- if (!is.null(total_jobs) && total_jobs > 0) as.numeric(parts[1]) / total_jobs else 0
-            run_prog$set(value = val, detail = paste(parts[-1], collapse="|"))
-          }
-        }
-      }
+      update_run_progress_from_file() # Poll Step 2 progress independently from worker status and log events.
     } else {
       elapsed_run <- format_elapsed(step_start_run())
+      update_run_progress_from_file() # Consume the final callback write before closing the progress modal.
+      run_exit_status <- p$get_exit_status()
+      run_result <- if (run_exit_status == 0) p$get_result() else NULL
+      if (run_exit_status == 0 && !is.null(run_result) && !is.null(run_prog)) { # Completed foreach results are authoritative if the last callback update was missed.
+        run_prog$set(
+          value = 1,
+          detail = sprintf("Processed %d of %d simulation binaries...", run_result$total, run_result$total)
+        )
+      }
+      status_dir_to_clean <- run_status_dir()
+      log_path_to_finish <- run_log_path()
+      update_job_log_statuses(status_dir_to_clean, log_path_to_finish) # Flush any last events before removing the transient directory.
+      for (job_index in which(run_log_job_states$values == "RUNNING")) {
+        update_job_log_status(log_path_to_finish, job_index, "FAILED")
+      }
+      if (!is.null(log_path_to_finish) && file.exists(log_path_to_finish)) {
+        try(cat(sprintf("# Run ended: %s\n", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
+                 file = log_path_to_finish, append = TRUE), silent = TRUE)
+      }
+      run_log_path(NULL)
+      run_log_status_offsets$values <- numeric(0)
+      run_log_job_states$values <- character(0)
+      run_status_dir(NULL)
+      active_worker_display("Active rFVS Runs: none.")
+      if (!is.null(status_dir_to_clean) && dir.exists(status_dir_to_clean)) unlink(status_dir_to_clean, recursive = TRUE, force = TRUE)
       step_start_run(NULL)
       bg_run(NULL)
       if (!is.null(run_prog)) run_prog$close()
@@ -1890,8 +2153,7 @@ server <- function(input, output, session) {
       shinyjs::hide("kill_run_btn_wrap")
       updateActionButton(session, "kill_run_btn", label = "Cancel", icon = icon("xmark"))
       
-      if (p$get_exit_status() == 0) {
-        run_result <- p$get_result()
+      if (run_exit_status == 0) {
         completion_title <- if (isTRUE(active_run_is_test())) "Step 2 Test Complete: Sample Simulations Ran" else "Step 2 Complete: Simulations Ran"
         if (run_result$failed > 0L) {
           showModal(modalDialog(
@@ -1925,6 +2187,22 @@ server <- function(input, output, session) {
     if (!is.null(p) && isTRUE(p$is_alive())) {
       terminate_bg_process(p)
       bg_run(NULL)
+      status_dir_to_clean <- run_status_dir()
+      log_path_to_finish <- run_log_path()
+      update_job_log_statuses(status_dir_to_clean, log_path_to_finish) # Preserve completed jobs in the live log before cleanup.
+      for (job_index in which(run_log_job_states$values == "RUNNING")) {
+        update_job_log_status(log_path_to_finish, job_index, "CANCELLED")
+      }
+      if (!is.null(log_path_to_finish) && file.exists(log_path_to_finish)) {
+        try(cat(sprintf("# Run cancelled: %s\n", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
+                 file = log_path_to_finish, append = TRUE), silent = TRUE)
+      }
+      run_log_path(NULL)
+      run_log_status_offsets$values <- numeric(0)
+      run_log_job_states$values <- character(0)
+      run_status_dir(NULL)
+      active_worker_display("Active rFVS Runs: none.")
+      if (!is.null(status_dir_to_clean) && dir.exists(status_dir_to_clean)) unlink(status_dir_to_clean, recursive = TRUE, force = TRUE)
       if (!is.null(run_prog)) run_prog$close()
       run_prog <<- NULL
       step_start_run(NULL)

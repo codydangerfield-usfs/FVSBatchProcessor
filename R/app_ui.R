@@ -468,7 +468,7 @@ ui <- function(request) {
             icon = icon("file-code"),
             card(
               card_header("Pipeline Generation Status & Queue Diagnostics"),
-              p("Verifies setup context prior to generating standalone keyfile sequences:"),
+              p("Verify current project setup prior to generating standalone keyfile sequences:"),
               verbatimTextOutput("pipeline_diagnostics")
               
             )
@@ -479,9 +479,10 @@ ui <- function(request) {
             icon = icon("play"),
             card(
               card_header("Simulation Pipeline Execution Status"),
-              p("Verifies parameters relative to active database context before starting runs:"),
+              p("Verify parameters relative to active database context before starting runs:"),
               p(strong("Reminder:"), " Only scenarios that have not yet been simulated will be executed in order to save computation time. If you wish to rebuild and re-execute a previously completed scenario, use the 'Force Overwrite Specific Scenarios' dropdown on the left to mark it for deletion/rerun."),
-              verbatimTextOutput("pipeline_diagnostics_rfvs")
+              verbatimTextOutput("pipeline_diagnostics_rfvs"),
+              verbatimTextOutput("rfvs_active_workers")
             )
           ),
           nav_panel(
