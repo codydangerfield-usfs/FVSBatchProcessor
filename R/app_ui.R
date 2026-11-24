@@ -185,7 +185,7 @@ ui <- function(request) {
           tags$summary(strong("ℹ️ How Scenario Naming Works"), style = "cursor: pointer;"),
           tags$div(
             style = "margin-top: 10px; padding-left: 12px; border-left: 3px solid #18BC9C;",
-            p("The default programmatic naming scheme assumes you have a KCP folder like 'Prescriptions', where the Scenario becomes ", code("GROUP_CODE + Prescription"), ". However, you can specify any KCP folder to construct this name using the 'Scenario Columns' dropdown below, or it will default to ", code("GROUP_CODE + _NG"), " if no additional columns are specified."),
+            p("Scenario names combine ", code("GROUP_CODE"), " with the selected 'Scenario Columns', separated by underscores. If no columns are selected, the app uses the first Prescription-like column; if none exists, it uses ", code("GROUP_CODE_NG"), "."),
             p("These Scenario names can also be manually edited in the grid, but it is highly recommended to use a programmatic naming scheme so your runs remain correctly outlined and organized.")
           )
         ),
@@ -194,7 +194,7 @@ ui <- function(request) {
         actionButton("btn_expand_modal", " Auto-Populate Combinations", icon = icon("wand-magic-sparkles"), class = "btn-info w-100 mb-2"),
         hr(),
         downloadButton("download_excel", "Export Matrix to Excel", class = "btn-outline-primary w-100 mb-2"),
-        fileInput("upload_excel", "Import Excel Matrix File", accept = c(".xlsx", ".xls", ".csv"), buttonLabel = "Browse..."),
+        fileInput("upload_excel", "Import Matrix (.xlsx or .csv)", accept = c(".xlsx", ".csv"), buttonLabel = "Browse..."),
         hr(),
         actionButton("save_matrix", "Save KCP Scenarios & Build Manifest", class = "btn-primary w-100")
       ),
@@ -328,7 +328,7 @@ ui <- function(request) {
                   strong("Run rFVS Engine"),
                   tags$ul(
                     tags$li("Execute Scenarios: Run rFVS instances concurrently across user-specified compute cores."),
-                    tags$li(strong("Note:"), " The system tracks previously completed runs. If you add new scenarios to an existing project, only new un-simulated scenarios will be run, saving processing time. To rerun an already executed scenario, explicitly specify it in the 'Force Overwrite Specific Scenarios' dropdown on Tab 4.")
+                    tags$li(strong("Note:"), " A stand run is reused when its directory already contains exactly one .db file. This does not verify that its results match the current inputs. After changing KCPs or parameters for an existing scenario, select it in 'Force Overwrite Specific Scenarios' on Tab 4. Overwrite deletes existing .db and .out files for queued stand runs before rerunning.")
                   )
                 ),
                 tags$li(
@@ -346,7 +346,7 @@ ui <- function(request) {
               h5("Folder Structure & Expected Locations:"),
               p("Below is the recommended folder structure for organizing your project and running the FVS Batch Processor."),
               p("In this workflow, your R working directory becomes the project root and is used as the ", strong("Root Folder Path"), " (e.g., ", code("FVS_BatchProcessing"), ")."),
-              p("Inside that folder, the app expects an ", code("Inputs"), " folder with a single input database and a folder with ", code("KCP"), " in its name (for example, ", code("KCP_Catalog"), "). If the FVS project directory is setup this way, the app auto-detects both the input database and KCP catalog. During processing, ", code("rFVS_Runs"), " and ", code("Outputs"), " are created automatically. ", code("rFVS_Runs"), " stores individual stand-level run outputs per scenario, and ", code("Outputs"), " stores consolidated scenario databases plus the final master database."),
+              p("For automatic detection, use an ", code("Inputs"), " folder with a single .db or .sqlite input database and a folder with ", code("KCP"), " in its name (for example, ", code("KCP_Catalog"), "). Otherwise, select the database and KCP directory explicitly on Tab 1. During processing, ", code("rFVS_Runs"), " and ", code("Outputs"), " are created automatically. ", code("rFVS_Runs"), " stores individual stand-level run outputs per scenario, and ", code("Outputs"), " stores consolidated group/scenario databases plus the final master database. Stand output database names depend on your KCPs; out.db below is only an example."),
               pre("FVS_BatchProcessing
 \u251C\u2500\u2500 Inputs
 \u2502   \u2514\u2500\u2500 AllBKNF_Combined.db
@@ -377,10 +377,13 @@ ui <- function(request) {
 \u2502               \u251C\u2500\u2500 run.key
 \u2502               \u2514\u2500\u2500 run.out
 \u2514\u2500\u2500 Outputs
-    \u251C\u2500\u2500 Group_A_Rx01_TC01
-    \u2502   \u2514\u2500\u2500 FVSOut_Group_A_Rx01_TC01.db
-    \u2514\u2500\u2500 Group_B_Rx01_TC01
-        \u2514\u2500\u2500 FVSOut_Group_B_Rx01_TC01.db"),
+  \u251C\u2500\u2500 Group_A
+  \u2502   \u2514\u2500\u2500 Group_A_Rx01_TC01
+  \u2502       \u2514\u2500\u2500 FVSOut_Group_A_Rx01_TC01.db
+  \u251C\u2500\u2500 Group_B
+  \u2502   \u2514\u2500\u2500 Group_B_Rx01_TC01
+  \u2502       \u2514\u2500\u2500 FVSOut_Group_B_Rx01_TC01.db
+  \u2514\u2500\u2500 FVS_Out_<YYYYMMDD_HHMMSS>.db"),
               hr(),
               # h5("Workflow Diagram"),
               tags$figure(
@@ -480,7 +483,7 @@ ui <- function(request) {
             card(
               card_header("Simulation Pipeline Execution Status"),
               p("Verify parameters relative to active database context before starting runs:"),
-              p(strong("Reminder:"), " Only scenarios that have not yet been simulated will be executed in order to save computation time. If you wish to rebuild and re-execute a previously completed scenario, use the 'Force Overwrite Specific Scenarios' dropdown on the left to mark it for deletion/rerun."),
+              p(strong("Reminder:"), " Stand runs with exactly one existing .db output are reused unless overwrite is selected. Input changes are not detected automatically. Use 'Force Overwrite Specific Scenarios' to delete existing .db and .out files for queued stand runs and rerun them; back up any results you need to retain."),
               verbatimTextOutput("pipeline_diagnostics_rfvs"),
               verbatimTextOutput("rfvs_active_workers")
             )
@@ -491,7 +494,7 @@ ui <- function(request) {
             icon = icon("database"),
             card(
               card_header("Master Database Consolidation"),
-              p("This step consolidates all temporary stand-level SQLite databases generated by FVS into Scenario-specific databases, and then ultimately merges them into a single master FVS_Out_{Date}.db file in the Outputs folder."),
+              p("This step consolidates available stand-level SQLite databases into Outputs/<GROUP_CODE>/<Scenario>/FVSOut_<Scenario>.db, replacing previous group/scenario merged databases, then merges them into Outputs/FVS_Out_<YYYYMMDD_HHMMSS>.db. Consolidation uses the full configured queue, even when execution used test mode; verify run completion before treating the master as complete."),
               verbatimTextOutput("pipeline_diagnostics_merge")
             )
           )
