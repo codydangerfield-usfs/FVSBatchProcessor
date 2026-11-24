@@ -57,11 +57,11 @@ server <- function(input, output, session) {
     update_results
   }
 
-  update_job_log_status <- function(log_path, job_index, status) { # Update one fixed-width status field without adding another job line.
+  update_job_log_status <- function(log_path, job_index, status) { # Update one known job during exit/cancellation cleanup without reading worker events or shifting log rows.
     isTRUE(apply_job_log_status_batch(log_path, job_index, status)[1L])
   }
 
-  update_job_log_statuses <- function(status_dir, log_path) { # Apply worker status events to the existing job rows.
+  update_job_log_statuses <- function(status_dir, log_path) { # Read worker completion/failure events, batch their log updates, and clean up handled events during polling or final cleanup.
     if (is.null(status_dir) || !dir.exists(status_dir) || is.null(log_path) || !nzchar(log_path)) return(invisible(NULL))
     event_paths <- list.files(status_dir, pattern = "^job_status_.*\\.txt$", full.names = TRUE)
     pending_paths <- setdiff(event_paths, handled_job_events$paths)
@@ -896,30 +896,30 @@ server <- function(input, output, session) {
     }
   }, ignoreNULL = FALSE) # Run even when selection is NULL/empty so fallback naming (for example GROUP_CODE + _NG) is applied.
 
-  observeEvent(input$btn_create_merged_col, {
-    mode <- input$merge_col_mode
-    standalone_table <- input$stand_tbl
+  observeEvent(input$btn_create_merged_col, { # Create a persistent combined grouping column in the selected input database when the user clicks the merge button.
+    mode <- input$merge_col_mode # Choose between combining physical columns and extracting entries from GROUPS text.
+    standalone_table <- input$stand_tbl # Modify only the selected StandInit table; retain all original columns and values.
     
     root <- normalizePath(trimws(input$root_dir), winslash = "/", mustWork = FALSE)
     if (!nzchar(root)) root <- normalizePath(getShinyOption("FVS_USER_WD", default = getwd()), winslash = "/", mustWork = FALSE)
     db_name <- trimws(as.character(input$master_db))
-    db_path <- resolve_db_path(root, db_name)
+    db_path <- resolve_db_path(root, db_name) # Resolve the source database that will be altered directly, not a temporary copy.
     
     if (!file.exists(db_path)) {
       showNotification("Database not found. Please scan directory first.", type = "error")
       return()
     }
     
-    if (mode == "cols") {
+    if (mode == "cols") { # Join two or more physical column values with underscores for each stand.
       cols <- input$merge_cols_select
       if (length(cols) < 2) {
         showNotification("Please select at least 2 columns to merge.", type = "warning")
         return()
       }
-      new_col_name <- paste(cols, collapse = "_")
+      new_col_name <- paste(cols, collapse = "_") # Name the new TEXT field from the selected columns in selection order (for example VARIANT_BPS).
       
       con <- dbConnect(SQLite(), db_path)
-      on.exit(dbDisconnect(con), add = TRUE)
+      on.exit(dbDisconnect(con), add = TRUE) # Close the database connection when this event handler exits, including early returns.
       
       if (new_col_name %in% dbListFields(con, standalone_table)) {
          showNotification(sprintf("Column '%s' already exists.", new_col_name), type = "warning")
@@ -929,7 +929,7 @@ server <- function(input, output, session) {
       tryCatch({
         dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN %s TEXT", quote_sql_identifier(standalone_table), quote_sql_identifier(new_col_name)))
         
-        # Only populate the merged column when all source columns are non-NULL.
+        # Cast source values to text and join with underscores; SQL NULL propagates, but blank strings are retained.
         concat_expr <- paste(sprintf("CAST(%s AS TEXT)", sapply(cols, quote_sql_identifier)), collapse = " || '_' || ")
         nonnull_condition <- paste(sprintf("%s IS NOT NULL", sapply(cols, quote_sql_identifier)), collapse = " AND ")
 
@@ -944,7 +944,7 @@ server <- function(input, output, session) {
         
         showNotification(sprintf("Successfully created merged column: %s", new_col_name), type = "message")
         
-        # Update dropdowns
+        # Expose and select the new physical field for grouping; this does not change the GROUPS parsing-mode toggle.
         table_cols <- dbListFields(con, standalone_table)
         updateSelectInput(session, "group_col", choices = sort(table_cols), selected = new_col_name)
         updateSelectizeInput(session, "merge_cols_select", choices = sort(table_cols))
@@ -952,16 +952,16 @@ server <- function(input, output, session) {
         showNotification(paste("Error merging columns:", e$message), type = "error")
       })
       
-    } else if (mode == "groups") {
+    } else if (mode == "groups") { # Extract two or more selected GROUPS entries and combine their values into a physical column.
       groups <- input$merge_groups_select
       if (length(groups) < 2) {
         showNotification("Please select at least 2 GROUP entries to merge.", type = "warning")
         return()
       }
       
-      new_col_name <- paste(groups, collapse = "_")
+      new_col_name <- paste(groups, collapse = "_") # Use the selected entry names for the field name and their selection order for joined values.
       con <- dbConnect(SQLite(), db_path)
-      on.exit(dbDisconnect(con), add = TRUE)
+      on.exit(dbDisconnect(con), add = TRUE) # Release the connection after success, validation failure, or a handled error.
       
       table_cols <- dbListFields(con, standalone_table)
       grp_col_candidates <- table_cols[toupper(table_cols) == "GROUPS"]
@@ -978,7 +978,7 @@ server <- function(input, output, session) {
       
       withProgress(message = "Merging GROUP entries...", value = 0.5, {
         tryCatch({
-          df_stand <- dbGetQuery(con, sprintf("SELECT rowid, %s FROM %s", quote_sql_identifier(grp_col_name), quote_sql_identifier(standalone_table)))
+          df_stand <- dbGetQuery(con, sprintf("SELECT rowid, %s FROM %s", quote_sql_identifier(grp_col_name), quote_sql_identifier(standalone_table))) # Keep SQLite row IDs to write each derived value back to its original stand row.
           
           # Extract each selected GROUPS entry independently. Standalone tokens
           # (for example All_FIA_Conditions) return their token, while entries
@@ -1013,7 +1013,7 @@ server <- function(input, output, session) {
           
           dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN %s TEXT", quote_sql_identifier(standalone_table), quote_sql_identifier(new_col_name)))
           
-          # Parameterized update back to the SQLite DB
+          # Write only complete combinations by row ID using bound values; other rows keep the new column's default SQL NULL.
           update_df <- data.frame(new_val = merged_vals, row_id = df_stand$rowid, stringsAsFactors = FALSE)
           update_df <- update_df[!is.na(update_df$new_val), ]
           
@@ -1028,6 +1028,7 @@ server <- function(input, output, session) {
           
           showNotification(sprintf("Successfully created merged column: %s", new_col_name), type = "message")
           
+          # Make the derived physical column available for grouping without changing the GROUPS parsing-mode toggle.
           table_cols <- dbListFields(con, standalone_table)
           updateSelectInput(session, "group_col", choices = sort(table_cols), selected = new_col_name)
           updateSelectizeInput(session, "merge_cols_select", choices = sort(table_cols))
